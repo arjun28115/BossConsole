@@ -26,6 +26,40 @@ internal fun canonicalModifiers(modifiers: List<String>): Set<String> =
         }
 
 /**
+ * The prefix `Key.toString()` renders in front of a key's name.
+ *
+ * Compose exposes no accessor for the name itself, so anything that needs one reads it back out
+ * of the rendered string. Two places did that with their own copy of the offset; naming it once
+ * means they cannot disagree about where the name starts.
+ */
+private const val KEY_RENDER_PREFIX = "Key: "
+
+/**
+ * The name Compose renders for a [Key], which is one of the two key vocabularies in the app.
+ *
+ * The other is `AWTKeyboardInterceptor.getKeyName`. Neither is derived from the other, and where
+ * they disagree a chord fires on one path and silently does nothing on the other;
+ * [canonicalKeyName] is the fold that reconciles them and `KeyVocabularyAgreementTest` walks both.
+ *
+ * Two things about this rendering are worth knowing before depending on it. It is not the
+ * presets' vocabulary - the left arrow renders "Left" against their "DirectionLeft". And it is
+ * not stable: `Key.toString()` falls through to AWT's `getKeyText`, which answers with a word
+ * while the toolkit is cold and with the macOS glyph once it is up, so `Key.Tab` is "Tab" in a
+ * headless test and "⇥" in a running app. Anything PERSISTING a name wants the fold, not this.
+ *
+ * `Key.keyCode` is a packed Long rather than a name, so it is a last resort here and only for a
+ * key Compose itself cannot name, where `toString()` already renders the bare number.
+ */
+internal fun composeKeyName(key: Key): String {
+    val rendered = key.toString()
+    return if (rendered.startsWith(KEY_RENDER_PREFIX)) {
+        rendered.substring(KEY_RENDER_PREFIX.length).trim()
+    } else {
+        key.keyCode.toString()
+    }
+}
+
+/**
  * The one name a key answers to, with every spelling the codebase can produce folded together.
  *
  * Three vocabularies reach this: Compose's `Key` property names, which the presets store
@@ -61,8 +95,27 @@ private val KEY_ALIASES: Map<String, String> =
         alias("directionup", "up", "arrowup", "↑")
         alias("directiondown", "down", "arrowdown", "↓")
         alias("space", "spacebar", "␣", " ")
-        alias("escape", "esc")
-        alias("enter", "return")
+        // Compose renders these two ways on one machine. `Key.toString()` falls through to AWT's
+        // `getKeyText`, which answers with a word while the toolkit is cold and with the macOS
+        // glyph once it is up - so "Tab" and "⇥" are both real spellings of one key, and which
+        // one you get depends on nothing the user did.
+        //
+        // The GLYPH is what a running app produces, so these were live on the Compose matcher
+        // path before any of this: `KeymapMatcher` derives the event's name from `Key.toString()`
+        // and compares it against the preset's, so Ctrl+Tab and Ctrl+Shift+Tab - TAB_NEXT and
+        // TAB_PREVIOUS, shipped in all four presets - asked whether "⇥" was "Tab" and were told
+        // no. They survive on the AWT interceptor, which says "Tab" on both sides. Measured warm
+        // and cold; `KeyVocabularyAgreementTest` covers whichever one an environment renders and
+        // `CanonicalKeyNameTest` enumerates both.
+        //
+        // The arrow and space glyphs above are here for the same reason; these are the rest.
+        alias("escape", "esc", "⎋")
+        alias("enter", "return", "⏎")
+        alias("tab", "⇥")
+        alias("backspace", "⌫")
+        alias("delete", "⌦")
+        alias("home", "↖")
+        alias("end", "↘")
         // A dedicated + key and Shift+= are the same chord to every preset: zoom in is stored as
         // Equals with a Cmd+Shift+Equals alternate.
         alias("equals", "plus", "+", "=")
@@ -76,12 +129,24 @@ private val KEY_ALIASES: Map<String, String> =
         alias("closebracket", "close bracket", "right bracket", "rightbracket", "]")
         // Shift+/ reports "?" on a US layout.
         alias("slash", "/", "?")
-        alias("backslash", "\\")
+        // "Back Slash" is Compose's cold spelling for `Key.Backslash`, the same spaced shape as
+        // the bracket keys above. Unlike the glyphs below this one is not reachable in a running
+        // app, which renders "\" - already folded here. It is kept because the cold spelling is
+        // what a headless or pre-toolkit path sees, and a fold that covers one of a key's two
+        // real spellings is the state every entry in this table was added to leave.
+        alias("backslash", "back slash", "\\")
         alias("semicolon", ";")
-        alias("apostrophe", "'")
         alias("comma", ",")
         alias("period", ".")
-        alias("grave", "`")
+        // Cold spellings again, in the same shape: Compose renders "Quote", "Back Quote",
+        // "Page Up" and "Page Down" where the interceptor says "Apostrophe", "Grave", "PageUp"
+        // and "PageDown". A running app renders "'" and "`" for the first two (already folded)
+        // and the glyphs above for the page keys. `KeyVocabularyAgreementTest` walks both tables
+        // so the next divergence fails a build rather than a keystroke.
+        alias("apostrophe", "quote", "'")
+        alias("grave", "back quote", "`")
+        alias("pageup", "page up", "⇞")
+        alias("pagedown", "page down", "⇟")
         // Digit characters against the word forms the presets store ("One" for Cmd+1).
         listOf("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
             .forEachIndexed { digit, word -> put(digit.toString(), word) }

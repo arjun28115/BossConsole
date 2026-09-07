@@ -66,6 +66,41 @@ class CanonicalKeyNameTest {
     }
 
     @Test
+    fun `the glyphs Compose renders once the AWT toolkit is up`() {
+        // `Key.toString()` falls through to AWT's `getKeyText`, which answers with a word while
+        // the toolkit is cold and with the macOS glyph once it is up - so one machine produces
+        // both spellings and which one a keymap holds depends on nothing the user did. Enumerated
+        // here rather than left to `KeyVocabularyAgreementTest`, whose input is whatever the
+        // environment happened to render: a cold run there cannot see a missing glyph.
+        assertAllSame("Escape", "Esc", "\u238B")
+        assertAllSame("Enter", "Return", "\u23CE")
+        assertAllSame("Tab", "\u21E5")
+        assertAllSame("Backspace", "\u232B")
+        assertAllSame("Delete", "\u2326")
+        assertAllSame("Home", "\u2196")
+        assertAllSame("End", "\u2198")
+        assertAllSame("PageUp", "Page Up", "\u21DE")
+        assertAllSame("PageDown", "Page Down", "\u21DF")
+        assertAllSame("Space", "Spacebar", "\u2423")
+        assertNotEquals(canonicalKeyName("\u21DE"), canonicalKeyName("\u21DF"))
+        assertNotEquals(canonicalKeyName("\u232B"), canonicalKeyName("\u2326"))
+        assertNotEquals(canonicalKeyName("\u2196"), canonicalKeyName("\u2198"))
+    }
+
+    @Test
+    fun `the spaced spellings Compose renders`() {
+        // `Key.toString()` is where the capture dialog and the Compose matcher both get a name,
+        // and it spaces words the AWT interceptor and the presets run together. Every one of
+        // these was a chord that resolved on one path and silently did nothing on the other;
+        // `KeyVocabularyAgreementTest` is what walks the whole keyboard for the next one.
+        assertAllSame("Backslash", "Back Slash", "\\")
+        assertAllSame("Apostrophe", "Quote", "'")
+        assertAllSame("Grave", "Back Quote", "`")
+        assertNotEquals(canonicalKeyName("PageUp"), canonicalKeyName("PageDown"))
+        assertNotEquals(canonicalKeyName("Grave"), canonicalKeyName("Apostrophe"))
+    }
+
+    @Test
     fun `an unknown name canonicalises to itself, case-folded`() {
         // What makes the presets' own vocabulary the default answer rather than a special case.
         assertEquals(canonicalKeyName("F7"), canonicalKeyName("f7"))
