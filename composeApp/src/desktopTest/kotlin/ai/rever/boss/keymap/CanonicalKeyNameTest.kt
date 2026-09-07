@@ -1,6 +1,8 @@
 package ai.rever.boss.keymap
 
 import ai.rever.boss.keymap.model.canonicalKeyName
+import ai.rever.boss.keymap.model.composeKeyName
+import androidx.compose.ui.input.key.Key
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
@@ -98,6 +100,20 @@ class CanonicalKeyNameTest {
         assertAllSame("Grave", "Back Quote", "`")
         assertNotEquals(canonicalKeyName("PageUp"), canonicalKeyName("PageDown"))
         assertNotEquals(canonicalKeyName("Grave"), canonicalKeyName("Apostrophe"))
+    }
+
+    @Test
+    fun `a packed Key keyCode folds onto the key it stands for`() {
+        // What every rebind made in the Shortcuts screen wrote before #329. An unmigrated keymap
+        // has to keep matching, so the fold answers for these rather than only the migration.
+        listOf(Key.DirectionLeft, Key.Spacebar, Key.Enter, Key.Escape, Key.A, Key.One, Key.Backslash)
+            .forEach { key ->
+                assertEquals(
+                    canonicalKeyName(composeKeyName(key)),
+                    canonicalKeyName(key.keyCode.toString()),
+                    "a stored keyCode should be the same key as its name: $key",
+                )
+            }
     }
 
     @Test
