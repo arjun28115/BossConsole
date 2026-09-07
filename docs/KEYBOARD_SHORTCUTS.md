@@ -22,11 +22,24 @@ The application features a comprehensive keyboard shortcuts system (Issue #201) 
 ### Event Flow
 
 1. **MenuBar** (native OS level) - Handles GLOBAL context shortcuts via native menu accelerators
-2. **KeyboardEventBus** - Central event distribution with priority-based handling:
+2. **AWTKeyboardInterceptor** - A `KeyEventDispatcher` installed on the `KeyboardFocusManager`,
+   so it sees the event before any Swing/AWT component does. This is what makes shortcuts work
+   while a terminal or browser holds focus: BossTerm consumes every key it is given for terminal
+   emulation, and JxBrowser's page surface is a heavyweight component, so without this the only
+   shortcuts that survived would be the ones the native menu carries an accelerator for. It reads
+   the keymap directly and returns early unless Cmd, Ctrl or Alt is down.
+3. **KeyboardEventBus** - Central event distribution with priority-based handling:
    - **COMPONENT** (priority 0) - Terminal, browser, editor handle their own shortcuts first
    - **WORKSPACE** (priority 1) - Workspace-level shortcuts (panel navigation, workspace save)
    - **GLOBAL** (priority 2) - App-wide shortcuts (window management, settings, focus mode)
-3. **BossActionHandler** - Executes the actual action for each shortcut
+4. **BossActionHandler** - Executes the actual action for each shortcut
+
+**Two matchers, not one.** `AWTKeyboardInterceptor` answers from AWT key codes; `KeymapMatcher`
+answers from Compose `KeyEvent`s and serves the Shortcuts screen's tester,
+`KeymapHandler.getMatchingBindings` and the remote-surface key tap. They read the same keymap but
+name keys from different sources, which is why the fold described under
+[Key names](#key-names) exists. A chord that works in one place and silently does nothing in
+another is almost always the two disagreeing about what a key is called.
 
 ### Key Components
 
@@ -35,6 +48,11 @@ The application features a comprehensive keyboard shortcuts system (Issue #201) 
 - `KeyBinding.kt` - Individual shortcut with key, modifiers, context, category, description
 - `KeymapSettings.kt` - Container for all shortcuts with preset tracking
 - `KeymapActions.kt` - Registry of 47 action IDs across 11 categories
+
+**AWT interception** (`composeApp/src/desktopMain/kotlin/ai/rever/boss/window/`):
+- `AWTKeyboardInterceptor.kt` - The `KeyboardFocusManager` dispatcher described above. Also owns
+  double-shift detection and the MRU tab cycle, both of which need key-up events that never reach
+  Compose.
 
 **Handler System** (`composeApp/src/commonMain/kotlin/ai/rever/boss/keymap/handler/`):
 - `KeymapMatcher.kt` - Matches keyboard events to configured bindings
@@ -310,6 +328,55 @@ Configuration file location: `~/.boss/keymap-settings.json`
 }
 ```
 
+## Key names
+
+`keymap-settings.json` is documented above as hand-editable, so this is the vocabulary a `"key"`
+value is read against.
+
+**One key has several spellings, and all of them work.** Comparison folds through
+`canonicalKeyName` (`keymap/model/KeyBinding.kt`) before anything is matched, signed for conflict
+detection, or compared during preset migration. Case is not significant.
+
+| Key | Spellings that all mean the same key |
+|---|---|
+| Arrows | `DirectionLeft`, `Left`, `ArrowLeft`, `←` (and the same shape for Right/Up/Down) |
+| Space | `Space`, `Spacebar`, `␣` |
+| Escape | `Escape`, `Esc` |
+| Enter | `Enter`, `Return` |
+| Brackets | `OpenBracket`, `Open Bracket`, `Left Bracket`, `LeftBracket`, `[` (and the closing pair) |
+| Equals | `Equals`, `Plus`, `+`, `=` |
+| Digits | `One` and `1`, `Two` and `2`, and so on |
+| Punctuation | `Minus`/`-`, `Slash`/`/`/`?`, `Backslash`/`\`, `Semicolon`/`;`, `Apostrophe`/`'`, `Comma`/`,`, `Period`/`.`, `Grave`/`` ` `` |
+
+The presets store the first column, which is Compose's `Key` property naming. Prefer it when
+editing by hand: it is what every shipped binding uses, and it is what the Shortcuts screen shows
+back to you.
+
+**Why there is more than one spelling to fold.** Three sources produce a key name and none of
+them agree:
+
+- **The presets**, which use Compose's property names (`DirectionLeft`, `OpenBracket`).
+- **`AWTKeyboardInterceptor.getKeyName`**, a hand-maintained table over AWT key codes.
+- **`Key.toString()`**, which is where `KeymapMatcher` and the Shortcuts screen get a name.
+
+The third is worth knowing about before relying on it, because it is not stable.
+`Key.toString()` falls through to AWT's `KeyEvent.getKeyText`, which answers with a word while
+the AWT toolkit is cold and with the platform glyph once it is up. Measured on macOS, JDK 21:
+
+| `Key` | headless / toolkit cold | running app | preset spelling |
+|---|---|---|---|
+| `Key.Tab` | `Tab` | `⇥` | `Tab` |
+| `Key.DirectionLeft` | `Left` | `←` | `DirectionLeft` |
+| `Key.LeftBracket` | `Open Bracket` | `[` | `OpenBracket` |
+| `Key.RightBracket` | `Close Bracket` | `]` | `CloseBracket` |
+
+Every cell in a row is the same key. Which one you get depends on nothing the user did, and the
+spellings are platform-dependent on top of that.
+
+So a hand-written comparison against a key name is a bug waiting to happen, and has been one
+several times. Anything comparing key names should call `canonicalKeyName`, and anything
+persisting one should fold it first rather than storing what was rendered.
+
 ## Troubleshooting
 
 If shortcuts stop working:
@@ -319,6 +386,13 @@ If shortcuts stop working:
 4. Verify the correct preset is selected
 
 Common issues:
+- **A shortcut you rebound yourself does nothing.** Open the file and look at its `"key"`. If it
+  is a long number (`"key": "4294967333"`), that is a packed `Key.keyCode` rather than a name and
+  no matcher will ever compare against it. Replace it with the key's name from the table under
+  [Key names](#key-names), or delete that entry and let the preset default come back.
+- **A shortcut works in one place but not another.** The two matchers name keys from different
+  sources (see [Key names](#key-names)). A chord that fires normally but reports "no match" in the
+  Shortcuts screen's tester, or that a focused plugin surface swallows, is the signature.
 - **Stale settings file**: Delete `~/.boss/keymap-settings.json` and restart
 - **Conflicts**: Settings UI shows visual warnings for conflicting shortcuts
 - **Focus mode**: Settings window and shortcuts work in focus mode (fixed in Issue #74)
