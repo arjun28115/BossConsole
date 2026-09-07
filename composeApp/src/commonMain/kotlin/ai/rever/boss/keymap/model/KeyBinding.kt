@@ -82,8 +82,11 @@ internal fun canonicalKeyName(keyName: String): String {
  * This is the set of keys BOSS can actually dispatch: exactly what
  * `AWTKeyboardInterceptor.getKeyName` names, folded through [canonicalKeyName], which is also
  * every key `KeymapPresets` binds and every key the capture dialog can store.
- * `ShortcutTesterKeyNamesTest` pins it against that table in both directions, so a key added to
- * one is added to the other or a build fails.
+ * `ShortcutTesterKeyNamesTest` checks it against that table in both directions: nothing here is
+ * unrecognised by the tester, and nothing here is a key the interceptor cannot name. What it does
+ * NOT catch is a key added to the interceptor's table alone, because the test drives that table
+ * through a hand-written list of AWT key codes rather than reading the `when` itself. Adding a
+ * key there means adding it here by hand.
  *
  * It exists because the Shortcuts screen's tester had its own hand-written copy of this list -
  * the fourth in the codebase - and it was wrong. It omitted every function key and Home, End,

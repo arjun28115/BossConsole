@@ -22,8 +22,13 @@ import java.awt.event.KeyEvent as AwtKeyEvent
  */
 class ShortcutTesterKeyNamesTest {
     /**
-     * Every key `AWTKeyboardInterceptor.getKeyName` names, which is every key the host can
-     * dispatch a shortcut for. Read from the table rather than restated, so the two cannot drift.
+     * The key codes whose names are checked against the tester's vocabulary.
+     *
+     * The NAMES are read from `AWTKeyboardInterceptor.getKeyName`, so no spelling is restated
+     * here. The CODES are a hand-written list, and that is this test's one blind spot: a key
+     * added to the interceptor's `when` and not to this list is checked by nothing. Reading the
+     * `when` itself would need reflection over a private table, so the honest thing is to say so
+     * rather than to claim a guarantee that is not there.
      */
     private val dispatchableKeyCodes: List<Int> =
         buildList {
@@ -170,6 +175,33 @@ class ShortcutTesterKeyNamesTest {
             complaints.isEmpty(),
             "the tester does not recognise keys BOSS ships bindings for:\n" + complaints.joinToString("\n"),
         )
+    }
+
+    @Test
+    fun `a key stored as a raw key code still fails, rather than being softened to a note`() {
+        // The one case the old hand-written check was right about, and the one this PR must not
+        // lose with it: no matcher compares against a number, so such a binding fires on neither
+        // path. A user whose rebind silently does nothing opens this screen to find out why, and
+        // a green row with a parenthetical note is the wrong answer for them.
+        listOf("4294967333", "281474976710721", "12").forEach { stored ->
+            assertTrue(
+                ShortcutTestRunner.looksLikePackedKeyCode(stored),
+                "'$stored' is a packed key code and should still be reported as a failure",
+            )
+        }
+    }
+
+    @Test
+    fun `a real key name is never mistaken for a raw key code`() {
+        // The guard is "two or more characters, all digits", which has to leave the single-digit
+        // spellings alone: "1" is the One key, and failing it would be the false failure this PR
+        // exists to remove, reintroduced by the fix for it.
+        (listOf("1", "9", "0", "F5", "F12", "Tab", "Home", "-", "=") + KNOWN_KEY_NAMES).forEach { name ->
+            assertTrue(
+                !ShortcutTestRunner.looksLikePackedKeyCode(name),
+                "'$name' names a real key and must not be reported as a raw key code",
+            )
+        }
     }
 
     @Test
