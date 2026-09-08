@@ -59,6 +59,25 @@ class PluginClassLoader(
     private val sharedPackages: Set<String> = defaultSharedPackages,
 ) : URLClassLoader(urls, parent) {
     companion object {
+        init {
+            // Must run during class initialisation of the LOADER class, and it is
+            // caller-sensitive: `registerAsParallelCapable` resolves
+            // `Reflection.getCallerClass().asSubclass(ClassLoader.class)`, so a
+            // caller that is not itself a ClassLoader subclass throws
+            // ClassCastException out of a static initialiser.
+            //
+            // A Kotlin `companion object { init { } }` looks like the wrong place
+            // for that, since companion members generally compile into
+            // `PluginClassLoader$Companion`. This block does not: the compiler
+            // emits it into `PluginClassLoader.<clinit>`, so the caller is this
+            // class and the registration is valid. Verified in the bytecode, and
+            // pinned behaviourally by ParallelCapableClassLoadingTest, which
+            // asserts that `getClassLoadingLock` hands out per-name locks. Without
+            // registration it returns `this` for every name, which is exactly the
+            // silent regression this comment exists to prevent.
+            registerAsParallelCapable()
+        }
+
         private val logger = BossLogger.forComponent("PluginClassLoader")
 
         /**
@@ -276,13 +295,50 @@ class PluginClassLoader(
         val isSharedPackage = sharedPackages.any { name.startsWith(it) }
 
         return if (isSharedPackage) {
-            // Parent-first loading for shared packages
+            // Parent-first loading for shared packages. `super.loadClass` takes
+            // getClassLoadingLock itself, so this path was never the exposed one.
             super.loadClass(name, resolve)
         } else {
-            // Child-first loading for plugin classes
-            loadClassChildFirst(name, resolve)
+            // Child-first loading for plugin classes.
+            //
+            // Under the per-name lock, which overriding loadClass had bypassed
+            // entirely: `ClassLoader.loadClass` holds it around its whole
+            // find-then-define sequence, and calling findClass directly did not.
+            // Two threads could both miss findLoadedClass above, both reach
+            // defineClass, and one would get
+            // `LinkageError: attempted duplicate class definition`. Plugins are
+            // multi-threaded by construction - a Ktor server, Compose
+            // recomposition and a coroutine dispatcher can all first-touch the
+            // same class - so this was reachable rather than theoretical.
+            synchronized(getClassLoadingLock(name)) {
+                // Re-check inside the lock. The findLoadedClass above ran outside
+                // it, so the thread that lost the race must see the winner's class
+                // rather than try to define it again.
+                val definedByAnotherThread = findLoadedClass(name)
+                if (definedByAnotherThread != null) {
+                    // The winner resolves inside loadClassChildFirst; the loser has
+                    // to do it here or `resolve = true` would silently not resolve.
+                    if (resolve) {
+                        resolveClass(definedByAnotherThread)
+                    }
+                    definedByAnotherThread
+                } else {
+                    loadClassChildFirst(name, resolve)
+                }
+            }
         }
     }
+
+    /**
+     * Test seam for [ParallelCapableClassLoadingTest].
+     *
+     * `getClassLoadingLock` is protected, and what it returns is the only
+     * observable proof that the parallel-capable registration took effect: a
+     * registered loader hands out a distinct lock per class name, an unregistered
+     * one returns `this` for every name. Nothing else about the loader changes,
+     * which is why the failure mode is silent.
+     */
+    internal fun classLoadingLockFor(name: String): Any = getClassLoadingLock(name)
 
     /**
      * Load a class with child-first strategy.

@@ -50,6 +50,7 @@
     <ID>TooGenericExceptionCaught:PluginManifestReader.kt$PluginManifestReader$e: Exception</ID>
     <ID>TooGenericExceptionCaught:PluginSignatureVerifier.kt$PluginSignatureVerifier$e: Exception</ID>
     <ID>TooManyFunctions:DynamicPluginLoader.kt$DynamicPluginLoaderImpl : DynamicPluginLoader</ID>
+    <ID>TooManyFunctions:PluginClassLoader.kt$PluginClassLoader : URLClassLoader</ID>
     <ID>TooManyFunctions:PluginClassLoaderManager.kt$PluginClassLoaderManager</ID>
   </CurrentIssues>
 </SmellBaseline>
