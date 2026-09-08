@@ -153,8 +153,15 @@ class PluginLoaderDelegateImpl(
             // sidecar goes with it: an uninstall→reinstall of the same version
             // reuses the filename, so a surviving `.sig` would meet fresh bytes
             // and hard-fail at load — worse than being unsigned.
-            runCatching { File(jarPath).delete() }
-            runCatching { PluginSignatureSidecar.delete(jarPath) }
+            //
+            // Gated on the JAR going, like every other paired delete: if the JAR
+            // survives (held open, read-only dir) it will be refused again on the
+            // next scan, and an unsigned survivor is a worse starting point than a
+            // signed one should enforcement ever reach this path.
+            val jarDeleted = runCatching { File(jarPath).delete() }.getOrDefault(false)
+            if (jarDeleted) {
+                runCatching { PluginSignatureSidecar.delete(jarPath) }
+            }
             logger.info(
                 LogCategory.SYSTEM,
                 "Refusing to install microkernel runtime as a plugin",
