@@ -149,15 +149,10 @@ internal object PluginLoadGateRecovery {
      * so clearing it would remove the only explanation of why the plugin is missing during the
      * window between downloading and restarting.
      */
+    // In-flight states acknowledge the existing update; the gate stays recorded until restart.
     private suspend fun updateHost(remedy: PluginLoadRemedy.UpdateHost): Result<String> {
         val updater = UpdateManager.instance
-        val info =
-            (updater.updateState.value as? UpdateState.UpdateAvailable)?.updateInfo
-                ?: return Result.failure(
-                    IllegalStateException("The update to ${remedy.availableVersion} is no longer available."),
-                )
-        updater.downloadUpdateInBackground(info)
-        return Result.success("Downloading BOSS ${remedy.availableVersion}. The plugin loads after the restart.")
+        return applyHostUpdateRemedy(remedy, updater.updateState.value, updater::downloadUpdateInBackground)
     }
 
     /**

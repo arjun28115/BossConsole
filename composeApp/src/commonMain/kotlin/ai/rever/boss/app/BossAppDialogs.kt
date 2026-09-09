@@ -6,6 +6,7 @@ import ai.rever.boss.components.dialogs.ConfirmationDialog
 import ai.rever.boss.components.dialogs.GlobalSearchDialog
 import ai.rever.boss.components.dialogs.HtmlFileOpenDialog
 import ai.rever.boss.components.dialogs.LogoutConfirmationDialog
+import ai.rever.boss.components.dialogs.McpApprovalDialog
 import ai.rever.boss.components.dialogs.NewProjectWizardDialog
 import ai.rever.boss.components.dialogs.NewTabDialog
 import ai.rever.boss.components.dialogs.ProjectOpenModeDialog
@@ -24,6 +25,7 @@ import ai.rever.boss.components.plugin.DynamicPluginManager
 import ai.rever.boss.components.plugin.MissingDependencyDialog
 import ai.rever.boss.components.plugin.MissingHandlerPluginDialog
 import ai.rever.boss.components.plugin.MissingHandlerPluginEventBus
+import ai.rever.boss.components.plugin.PanelIds
 import ai.rever.boss.components.plugin.PluginDependencyEventBus
 import ai.rever.boss.components.plugin.PluginLoadGateHost
 import ai.rever.boss.components.plugin.PluginLoadRemedyAccess
@@ -46,6 +48,7 @@ import ai.rever.boss.html.HtmlFileSettingsManager
 import ai.rever.boss.icons.FileIcons
 import ai.rever.boss.keymap.KeymapSettingsManager
 import ai.rever.boss.keymap.model.KeymapActions
+import ai.rever.boss.mcp.McpToolRegistryImpl
 import ai.rever.boss.platform.rememberDirectoryPicker
 import ai.rever.boss.plugin.api.Panel.Companion.left
 import ai.rever.boss.plugin.api.Panel.Companion.top
@@ -713,6 +716,21 @@ internal fun BossAppDialogs(state: BossAppState) {
                 coroutineScope.launch { DashboardEventBus.openUrlInNewTab(url, windowId) }
                 state.focusRequester.requestFocus()
             },
+            onMcpToolSelect = { mcp ->
+                state.showGlobalSearchDialog = false
+                // Same verb as onToolSelect: open Toolbox so kill-switches are reachable without a
+                // coding CLI attached (BossConsole#380). Does not invoke the MCP tool.
+                val message =
+                    if (state.draggablePanelComponent.toolboxSidebarItem() != null) {
+                        state.draggablePanelComponent.revealPlugin(PanelIds.PLUGIN_MANAGER.panelId)
+                        "In Toolbox, select MCP and find ${mcp.name} to manage its kill-switch"
+                    } else {
+                        "Toolbox is unavailable in this window; the MCP tool was not run or changed"
+                    }
+                // Status messages are process-wide; only this window reveals Toolbox.
+                StatusMessageManager.showMessage(message, durationMs = 8_000L)
+                state.focusRequester.requestFocus()
+            },
         )
     }
 
@@ -780,6 +798,21 @@ internal fun BossAppDialogs(state: BossAppState) {
                 )
                 splitViewState.openTerminalInActivePanel(pending.command, pending.workingDirectory)
                 DashboardStatsManager.recordTerminalSession()
+            },
+        )
+    }
+
+    // Interactive approval dialog for governed MCP tools invoked by an AI agent
+    state.pendingMcpApproval?.let { approvalRequest ->
+        val pendingList by McpToolRegistryImpl.approvalBus.pendingList.collectAsState()
+        McpApprovalDialog(
+            request = approvalRequest,
+            pendingQueueSize = pendingList.size,
+            onApprove = { trustForSession ->
+                McpToolRegistryImpl.approvalBus.approve(approvalRequest.id, trustForSession)
+            },
+            onDeny = { reason ->
+                McpToolRegistryImpl.approvalBus.deny(approvalRequest.id, reason)
             },
         )
     }
