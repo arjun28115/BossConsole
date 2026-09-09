@@ -27,7 +27,8 @@ The application features a comprehensive keyboard shortcuts system (Issue #201) 
    while a terminal or browser holds focus: BossTerm consumes every key it is given for terminal
    emulation, and JxBrowser's page surface is a heavyweight component, so without this the only
    shortcuts that survived would be the ones the native menu carries an accelerator for. It reads
-   the keymap directly and returns early unless Cmd, Ctrl or Alt is down.
+   the keymap directly and, after handling double-shift and key releases, skips ordinary
+   chord matching unless Cmd, Ctrl or Alt is down.
 3. **KeyboardEventBus** - Central event distribution with priority-based handling:
    - **COMPONENT** (priority 0) - Terminal, browser, editor handle their own shortcuts first
    - **WORKSPACE** (priority 1) - Workspace-level shortcuts (panel navigation, workspace save)
@@ -335,30 +336,34 @@ Configuration file location: `~/.boss/keymap-settings.json`
 value is read against.
 
 **One key has several spellings, and all of them work.** Comparison folds through
-`canonicalKeyName` (`keymap/model/KeyBinding.kt`) before anything is matched, signed for conflict
+`canonicalKeyName` (`keymap/model/KeyBinding.kt`) before live events are matched, signed for conflict
 detection, or compared during preset migration. Case is not significant.
 
 | Key | Spellings that all mean the same key |
 |---|---|
 | Arrows | `DirectionLeft`, `Left`, `ArrowLeft`, `←` (and the same shape for Right/Up/Down) |
-| Space | `Space`, `Spacebar`, `␣` |
+| Space | `Spacebar`, `Space`, `␣`, `" "` (one literal space) |
 | Escape | `Escape`, `Esc` |
 | Enter | `Enter`, `Return` |
 | Brackets | `OpenBracket`, `Open Bracket`, `Left Bracket`, `LeftBracket`, `[` (and the closing pair) |
 | Equals | `Equals`, `Plus`, `+`, `=` |
-| Digits | `One` and `1`, `Two` and `2`, and so on |
+| Digits | `Zero`/`0` through `Nine`/`9` |
 | Punctuation | `Minus`/`-`, `Slash`/`/`/`?`, `Backslash`/`\`, `Semicolon`/`;`, `Apostrophe`/`'`, `Comma`/`,`, `Period`/`.`, `Grave`/`` ` `` |
 
 Prefer the first spelling in each row when editing by hand, such as `DirectionLeft` or
-`OpenBracket`. These are the spellings used by the presets; the left column groups key types.
+`OpenBracket`. These follow the preset vocabulary where presets bind the key; the left column
+groups key types. Single-spelling names such as `F5`, `Tab`, `Home`, `End`, `Backspace` and
+`Delete` also work. The aliases are covered by
+[`CanonicalKeyNameTest`](../composeApp/src/desktopTest/kotlin/ai/rever/boss/keymap/CanonicalKeyNameTest.kt).
 
-**Why there is more than one spelling to fold.** Three sources produce a key name and none of
-them agree:
+**Why there is more than one spelling to fold.** These sources supply key names with different spellings:
 
 - **The presets**, which use names such as `DirectionLeft` and `OpenBracket` (not always
   the literal Compose property name: Compose calls the bracket key `LeftBracket`).
 - **`AWTKeyboardInterceptor.getKeyName`**, a hand-maintained table over AWT key codes.
-- **`Key.toString()`**, which is where `KeymapMatcher` and the Shortcuts screen get a name.
+- **`Key.toString()`**, which supplies the Compose matcher's event name.
+- **Legacy shortcut capture** wrote `Key.keyCode.toString()` instead of a name. Builds with
+  the capture fix store a folded name; older builds produce the numeric values discussed below.
 
 The third is worth knowing about before relying on it, because it is not stable.
 `Key.toString()` falls through to AWT's `KeyEvent.getKeyText`, which answers with a word while
@@ -390,12 +395,14 @@ Common issues:
 - **A shortcut you rebound yourself does nothing.** Open the file and look at its `"key"`. If it
   is a long number (`"key": "4294967333"`), that is a packed `Key.keyCode` rather than a name and
   older builds cannot match it. Builds with the legacy-key repair convert recognised codes
-  during settings migration and at match time. If the code is still unresolved, re-record the
-  shortcut or replace it with a key name from [Key names](#key-names).
+  during settings migration and at match time. Replace an unresolved value with a key name
+  from [Key names](#key-names). Re-recording is an option only on builds with the capture fix;
+  on older builds the Shortcuts UI writes the numeric code again.
 - **A shortcut works in one place but not another.** The two matchers name keys from different
   sources (see [Key names](#key-names)). Compare focus routing, required modifiers and lifecycle
   conditions as well as the stored name. A tester result is a configuration check, not proof
-  that an event was dispatched or an action executed.
+  that an event was dispatched or an action executed. Older testers also reject working names
+  such as `F5`, `Left Bracket` and `←`; their FAILED verdict is not proof of a broken binding.
 - **Stale settings file**: Delete `~/.boss/keymap-settings.json` and restart
 - **Conflicts**: Settings UI shows visual warnings for conflicting shortcuts
 - **Focus mode**: Settings window and shortcuts work in focus mode (fixed in Issue #74)
