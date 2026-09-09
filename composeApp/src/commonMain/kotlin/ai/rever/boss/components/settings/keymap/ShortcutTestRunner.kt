@@ -341,7 +341,8 @@ data class TestProgress(
 
 private fun invalidKeyReason(keyName: String): String? =
     when {
-        ShortcutTestRunner.looksLikePackedKeyCode(keyName) -> "Stored as a raw key code ('$keyName') - re-record this shortcut"
+        ShortcutTestRunner.looksLikePackedKeyCode(keyName) ->
+            "Stored as a raw key code ('$keyName') - re-record this shortcut"
         keyName.isBlank() && !isKnownKeyName(keyName) -> "Empty key name - re-record this shortcut"
         else -> null
     }
