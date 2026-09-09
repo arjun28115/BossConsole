@@ -2,6 +2,7 @@ package ai.rever.boss.plugin
 
 import ai.rever.boss.config.GitHubConfig
 import ai.rever.boss.config.SupabaseClientConfig
+import ai.rever.boss.plugin.loader.PluginSignatureEnforcement
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import ai.rever.boss.plugin.loader.PluginStoreTrust
 import ai.rever.boss.plugin.pathutils.BossDirectories
@@ -872,11 +873,19 @@ object PluginStoreSetup {
         fetch: suspend (String, String, String) -> StoreSignatureOutcome = ::fetchStoreSignature,
     ): String? {
         val anchor = PluginStoreTrust.versionAnchor(manifest.pluginId, manifest.version, localSha256)
-        if (PluginSignatureSidecar.isKnownUnsignable(jarFile.absolutePath, anchor)) {
-            logger.debug(
+        // Enforcement makes a retry cheaper than leaving a corrected store row unreachable.
+        if (
+            !PluginSignatureEnforcement.enforceUnsigned &&
+            PluginSignatureSidecar.isKnownUnsignable(jarFile.absolutePath, anchor)
+        ) {
+            logger.warn(
                 LogCategory.SYSTEM,
-                "Skipping store signature lookup - this exact build is already known to be unsignable",
-                mapOf("pluginId" to manifest.pluginId, "version" to manifest.version),
+                "System plugin left unsigned - cached store artifact mismatch; remove the marker to retry",
+                mapOf(
+                    "pluginId" to manifest.pluginId,
+                    "version" to manifest.version,
+                    "marker" to PluginSignatureSidecar.unsignablePathFor(jarFile.absolutePath),
+                ),
             )
             return null
         }
@@ -889,6 +898,8 @@ object PluginStoreSetup {
             // Settled: remember it, so the next launch does not spend another
             // getDownloadUrl (and another `plugin_downloads` row) re-learning it.
             StoreSignatureOutcome.Mismatch -> {
+                // A replacement during the lookup merely leaves an inert old-digest marker.
+                // Unlike a signature, that cannot bind the wrong bytes or fail plugin loading.
                 PluginSignatureSidecar.markUnsignable(jarFile.absolutePath, anchor)
                 null
             }

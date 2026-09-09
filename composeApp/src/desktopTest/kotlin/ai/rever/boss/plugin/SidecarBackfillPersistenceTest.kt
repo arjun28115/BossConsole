@@ -1,12 +1,14 @@
 package ai.rever.boss.plugin
 
 import ai.rever.boss.plugin.api.PluginManifest
+import ai.rever.boss.plugin.loader.PluginSignatureEnforcement
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import kotlinx.coroutines.test.runTest
 import java.io.File
 import java.security.MessageDigest
 import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -25,9 +27,21 @@ class SidecarBackfillPersistenceTest {
             mainClass = "test.Main",
         )
 
+    private val previousEnforcement = System.getProperty(PluginSignatureEnforcement.PROPERTY)
+
+    @BeforeTest
+    fun disableEnforcement() {
+        System.setProperty(PluginSignatureEnforcement.PROPERTY, "false")
+    }
+
     @AfterTest
     fun cleanup() {
         directory.deleteRecursively()
+        if (previousEnforcement == null) {
+            System.clearProperty(PluginSignatureEnforcement.PROPERTY)
+        } else {
+            System.setProperty(PluginSignatureEnforcement.PROPERTY, previousEnforcement)
+        }
     }
 
     @Test
@@ -61,6 +75,22 @@ class SidecarBackfillPersistenceTest {
                     PluginStoreSetup.StoreSignatureOutcome.Signed("signature")
                 }
             assertEquals("signature", signature)
+        }
+
+    @Test
+    fun `enforcement bypasses a cached mismatch to recover a corrected store row`() =
+        runTest {
+            assertNull(
+                PluginStoreSetup.resolveSignatureToBind(jar, manifest, "digest") { _, _, _ ->
+                    PluginStoreSetup.StoreSignatureOutcome.Mismatch
+                },
+            )
+            System.setProperty(PluginSignatureEnforcement.PROPERTY, "true")
+            val signature =
+                PluginStoreSetup.resolveSignatureToBind(jar, manifest, "digest") { _, _, _ ->
+                    PluginStoreSetup.StoreSignatureOutcome.Signed("corrected-signature")
+                }
+            assertEquals("corrected-signature", signature)
         }
 
     @Test
