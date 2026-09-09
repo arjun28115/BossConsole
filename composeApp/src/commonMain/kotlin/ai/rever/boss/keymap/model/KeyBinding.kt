@@ -60,6 +60,52 @@ internal fun composeKeyName(key: Key): String {
 }
 
 /**
+ * The name a captured [Key] should be STORED under, as opposed to merely compared by.
+ *
+ * [composeKeyName] gives whatever Compose renders, which is not the vocabulary the presets use:
+ * the left arrow renders "Left" against the presets' "DirectionLeft", the right bracket renders
+ * "Close Bracket" against "CloseBracket", and the 1 key renders "1" against "One". Every one of
+ * those MATCHES, because [canonicalKeyName] folds them - but none of them DISPLAYS the same,
+ * because `KeyStroke.formatKeyDisplay` knows "directionleft" and not "left". Stored raw, a
+ * rebound arrow would sit in the Shortcuts list as "⌘LEFT" beside a preset's "⌘←".
+ *
+ * Folding first makes a rebind indistinguishable from a preset binding everywhere: same match,
+ * same signature, same rendering. It also makes the stored value STABLE, which the raw rendering
+ * is not: `Key.toString()` falls through to AWT's `getKeyText`, so the same user rebinding Tab
+ * gets "Tab" or "⇥" in their file depending on whether the toolkit was up when they did it.
+ *
+ * Case is the one thing the fold does not carry, so the file
+ * gains "directionleft" where a preset has "DirectionLeft" - every comparison in the keymap is
+ * case-insensitive, and a lowercase name a reader can recognise beats a correctly-cased one
+ * nobody can.
+ */
+internal fun storedKeyName(key: Key): String = canonicalKeyName(composeKeyName(key))
+
+/**
+ * The key name a stored packed `Key.keyCode` stands for, or null when [stored] is not one.
+ *
+ * Every keymap ever saved through the Shortcuts screen carries these, so two callers need the
+ * answer: [canonicalKeyName], so an unmigrated file still MATCHES, and the settings migration,
+ * so the file stops holding a fifteen-digit key and the Shortcuts list stops rendering one.
+ * Both want the folded name, for the reason [storedKeyName] gives.
+ *
+ * Guarded to strings no key name can be - two or more characters, all digits. The single-digit
+ * spellings are claimed by [KEY_ALIASES] before this is reached, and Compose names no key in
+ * digits alone, so this cannot shadow a real name.
+ */
+internal fun keyNameForStoredKeyCode(stored: String): String? {
+    if (stored.length < 2 || !stored.all { it.isDigit() }) return null
+    // `takeIf { it != stored }` is checked BEFORE folding: an unnamed keyCode renders as the bare
+    // number, there is nothing to repair, and handing it back to `canonicalKeyName` would spin it
+    // straight through here again.
+    return stored
+        .toLongOrNull()
+        ?.let { composeKeyName(Key(it)) }
+        ?.takeIf { it != stored }
+        ?.let { canonicalKeyName(it) }
+}
+
+/**
  * The one name a key answers to, with every spelling the codebase can produce folded together.
  *
  * Three vocabularies reach this: Compose's `Key` property names, which the presets store
@@ -73,7 +119,12 @@ internal fun composeKeyName(key: Key): String {
  */
 internal fun canonicalKeyName(keyName: String): String {
     val lower = keyName.lowercase()
-    return KEY_ALIASES[lower] ?: lower
+    // The keyCode branch is for a packed `Key.keyCode`, written by every pre-#329 rebind. It is
+    // folded here rather than only migrated because the migration rewrites ONE file: a keymap
+    // restored from a backup, copied off another machine, or exported and re-imported reaches the
+    // matchers before it reaches the migration, and the whole failure is a rebind that silently
+    // does nothing.
+    return KEY_ALIASES[lower] ?: keyNameForStoredKeyCode(lower) ?: lower
 }
 
 /**
@@ -151,8 +202,8 @@ private val KEY_ALIASES: Map<String, String> =
         alias("tab", "⇥")
         alias("backspace", "⌫")
         alias("delete", "⌦")
-        alias("home", "↖")
-        alias("end", "↘")
+        alias("home", "movehome", "↖")
+        alias("end", "moveend", "↘")
         // A dedicated + key and Shift+= are the same chord to every preset: zoom in is stored as
         // Equals with a Cmd+Shift+Equals alternate.
         alias("equals", "plus", "+", "=")
@@ -433,7 +484,10 @@ data class KeyBinding(
 
             return KeyBinding(
                 actionId = actionId,
-                key = key.keyCode.toString(),
+                // The name, not `key.keyCode` - see [composeKeyName]. Same defect as the capture
+                // dialog's (#329); this copy has no caller today, which is exactly why it would
+                // have been the one to survive.
+                key = storedKeyName(key),
                 modifiers = modifiers,
                 context = context,
                 enabled = true,
