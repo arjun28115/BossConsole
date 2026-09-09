@@ -8,23 +8,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/**
- * `writeFileContentSafe` promises to report failure rather than throw. It did not hold that for
- * an `Error`.
- *
- * `catch (e: Exception)` does not catch `StackOverflowError`, so the throw went straight through
- * `writeFileContent`, out of the `editor_write_file` MCP handler, and reached the caller as a bare
- * `StackOverflowError` instead of the handler's own "Write failed for <path>".
- * risa-labs-inc/boss-plugin-editor-tab#18 and #27 are two independent reports of exactly that, on
- * unrelated content.
- *
- * The warn that would have named the file never ran either, which is why #27 says the error
- * "gives no indication of which input caused it".
- *
- * None of this makes the write succeed: whatever recurses is upstream of this function, which is
- * `mkdirs` plus `writeText`. What these pin is that the failure is reported honestly instead of
- * escaping.
- */
+/** Failure containment inside the write operation, independent of upstream MCP failures. */
 class GuardedWriteTest {
     private val tmpDir = System.getProperty("java.io.tmpdir")
 
@@ -32,10 +16,10 @@ class GuardedWriteTest {
 
     @Test
     fun `a stack overflow is reported as failure, not thrown`() {
-        // The case the old catch could not express, and the one actually being reported.
+        // Inject the error inside the write boundary; upstream errors cannot be caught here.
         val written =
             guardedWrite(tempPath("overflow"), "<svg>...</svg>") { _, _ ->
-                throw StackOverflowError("deep recursion somewhere upstream")
+                throw StackOverflowError("recursion inside write")
             }
 
         assertFalse(written, "a StackOverflowError must be reported as a failed write, not escape the call")
