@@ -245,7 +245,7 @@ actual object KeymapSettingsManager {
      */
     actual suspend fun importFromJson(jsonString: String): KeymapSettings? =
         try {
-            val settings = json.decodeFromString<KeymapSettings>(jsonString)
+            val settings = repairStoredKeyCodes(json.decodeFromString<KeymapSettings>(jsonString), logger)
             updateSettings(settings)
             settings
         } catch (e: Exception) {

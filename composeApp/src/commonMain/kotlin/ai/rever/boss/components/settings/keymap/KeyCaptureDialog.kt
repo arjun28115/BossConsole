@@ -149,7 +149,7 @@ fun KeyCaptureDialog(
                                 shape = RoundedCornerShape(8.dp),
                             ).focusRequester(focusRequester)
                             .onPreviewKeyEvent { event ->
-                                if (event.type == KeyEventType.KeyDown) {
+                                if (event.type == KeyEventType.KeyDown && isShortcutCaptureKey(event.key)) {
                                     capturedKey = event.key
                                     val mods = mutableListOf<String>()
                                     val isMacOS = SystemUtils.isMacOS
@@ -266,3 +266,9 @@ private fun KeyDisplay(
         )
     }
 }
+
+private val modifierOnlyKeys =
+    setOf(Key.MetaLeft, Key.MetaRight, Key.CtrlLeft, Key.CtrlRight, Key.AltLeft, Key.AltRight, Key.ShiftLeft, Key.ShiftRight)
+
+/** A modifier alone cannot be dispatched by the AWT shortcut interceptor. */
+internal fun isShortcutCaptureKey(key: Key): Boolean = key !in modifierOnlyKeys
