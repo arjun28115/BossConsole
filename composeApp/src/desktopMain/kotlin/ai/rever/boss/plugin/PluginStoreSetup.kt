@@ -368,8 +368,9 @@ object PluginStoreSetup {
 
                     // Signature backfill and store repair both require authentication.
                     sidecarBackfill.setAuthenticated(token != null)
-                    if (token == null) storeRepairAuthenticationLosses.incrementAndGet()
-                    if (token != null) {
+                    if (token == null) {
+                        storeRepairAuthenticationLosses.incrementAndGet()
+                    } else {
                         scope.launch { maybeDrainStoreRepair() }
                     }
                 }
@@ -1266,16 +1267,14 @@ object PluginStoreSetup {
             if (installedJarFor(plugin) != null) return
             val manifest = readPluginManifest(downloaded) ?: error("Store JAR has no readable plugin manifest")
             val dest = StoreRepairArtifact.promote(plugin, downloaded, manifest, info.version)
-            if (!plugin.downloadOnly) {
-                val existing = PluginPersistence.getInstalledPlugins().find { it.pluginId == plugin.pluginId }
-                PluginPersistence.addInstalledPlugin(
-                    pluginId = plugin.pluginId,
-                    jarPath = dest.absolutePath,
-                    enabled = existing?.enabled ?: true,
-                    sourceUrl = existing?.sourceUrl,
-                    installedVersion = manifest.version,
-                )
-            }
+            val existing = PluginPersistence.getInstalledPlugins().find { it.pluginId == plugin.pluginId }
+            PluginPersistence.addInstalledPlugin(
+                pluginId = plugin.pluginId,
+                jarPath = dest.absolutePath,
+                enabled = existing?.enabled ?: true,
+                sourceUrl = existing?.sourceUrl,
+                installedVersion = manifest.version,
+            )
             logger.warn(
                 LogCategory.SYSTEM,
                 "System plugin repaired from the store after GitHub failed - active next launch",
