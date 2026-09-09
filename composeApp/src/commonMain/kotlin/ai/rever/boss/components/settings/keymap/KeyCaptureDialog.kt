@@ -268,7 +268,16 @@ private fun KeyDisplay(
 }
 
 private val modifierOnlyKeys =
-    setOf(Key.MetaLeft, Key.MetaRight, Key.CtrlLeft, Key.CtrlRight, Key.AltLeft, Key.AltRight, Key.ShiftLeft, Key.ShiftRight)
+    setOf(
+        Key.MetaLeft,
+        Key.MetaRight,
+        Key.CtrlLeft,
+        Key.CtrlRight,
+        Key.AltLeft,
+        Key.AltRight,
+        Key.ShiftLeft,
+        Key.ShiftRight,
+    )
 
 /** A modifier alone cannot be dispatched by the AWT shortcut interceptor. */
 internal fun isShortcutCaptureKey(key: Key): Boolean = key !in modifierOnlyKeys

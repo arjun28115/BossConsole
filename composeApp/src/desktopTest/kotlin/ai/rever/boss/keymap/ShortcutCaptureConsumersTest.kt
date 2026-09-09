@@ -29,7 +29,16 @@ class ShortcutCaptureConsumersTest {
 
     @Test
     fun `capture rejects modifier keys but accepts ordinary keys`() {
-        listOf(Key.MetaLeft, Key.MetaRight, Key.CtrlLeft, Key.CtrlRight, Key.AltLeft, Key.AltRight, Key.ShiftLeft, Key.ShiftRight)
+        listOf(
+        Key.MetaLeft,
+        Key.MetaRight,
+        Key.CtrlLeft,
+        Key.CtrlRight,
+        Key.AltLeft,
+        Key.AltRight,
+        Key.ShiftLeft,
+        Key.ShiftRight,
+    )
             .forEach { assertFalse(isShortcutCaptureKey(it), "$it is not an AWT-dispatchable shortcut key") }
         listOf(Key.N, Key.Tab, Key.One, Key.DirectionLeft).forEach { assertTrue(isShortcutCaptureKey(it)) }
     }
