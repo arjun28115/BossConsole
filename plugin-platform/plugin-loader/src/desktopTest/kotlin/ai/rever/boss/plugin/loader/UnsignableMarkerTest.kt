@@ -116,19 +116,20 @@ class ConcurrentSidecarWriteTest {
         val start = CountDownLatch(1)
         val failures = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
         try {
-            val writers = List(threads) { i ->
-                pool.submit {
-                    start.await()
-                    repeat(40) {
-                        runCatching { PluginSignatureSidecar.write(jar.absolutePath, if (i % 2 == 0) a else b) }
-                            .onFailure { failures.add(it) }
-                        val read = PluginSignatureSidecar.read(jar.absolutePath)
-                        if (read != null && read != a && read != b) {
-                            failures.add(AssertionError("torn sidecar of length ${read.length}"))
+            val writers =
+                List(threads) { i ->
+                    pool.submit {
+                        start.await()
+                        repeat(40) {
+                            runCatching { PluginSignatureSidecar.write(jar.absolutePath, if (i % 2 == 0) a else b) }
+                                .onFailure { failures.add(it) }
+                            val read = PluginSignatureSidecar.read(jar.absolutePath)
+                            if (read != null && read != a && read != b) {
+                                failures.add(AssertionError("torn sidecar of length ${read.length}"))
+                            }
                         }
                     }
                 }
-            }
             start.countDown()
             pool.shutdown()
             assertTrue(pool.awaitTermination(60, TimeUnit.SECONDS), "writers did not finish")
