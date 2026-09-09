@@ -116,7 +116,7 @@ class ConcurrentSidecarWriteTest {
         val start = CountDownLatch(1)
         val failures = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
         try {
-            repeat(threads) { i ->
+            val writers = List(threads) { i ->
                 pool.submit {
                     start.await()
                     repeat(40) {
@@ -132,6 +132,7 @@ class ConcurrentSidecarWriteTest {
             start.countDown()
             pool.shutdown()
             assertTrue(pool.awaitTermination(60, TimeUnit.SECONDS), "writers did not finish")
+            writers.forEach { it.get() }
         } finally {
             pool.shutdownNow()
         }
