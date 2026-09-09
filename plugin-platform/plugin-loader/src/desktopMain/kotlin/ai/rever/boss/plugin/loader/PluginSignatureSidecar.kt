@@ -56,10 +56,16 @@ object PluginSignatureSidecar {
      * throws on the file A already consumed. Both call sites wrap this in
      * `runCatching`, so it degraded to a warn rather than a crash — but the
      * surviving sidecar could be the interleaved one, and a wrong signature fails
-     * load harder than a missing one. Unique temps make the race impossible
-     * instead of merely survivable, which is worth a `createTempFile` now that
-     * sidecars are written from a background scope.
+     * load harder than a missing one. Unique temps prevent writers from sharing
+     * staging bytes. They do not serialize replacement of the final filename.
+     *
+     * Reads, writes and deletes share the object monitor: Windows can refuse a
+     * replacement while another thread holds the target open for reading or is
+     * replacing it. These small sidecar operations do no network or JAR hashing,
+     * so one process-wide lock avoids both that race and an unbounded lock map.
+     * Atomic replacement still protects readers outside this process where supported.
      */
+    @Synchronized
     fun write(
         jarPath: String,
         signatureBase64: String,
@@ -100,6 +106,7 @@ object PluginSignatureSidecar {
      * Only absence is treated as unsigned. Other read failures must propagate so
      * an existing but unreadable signature does not become warn-and-allow.
      */
+    @Synchronized
     fun read(jarPath: String): String? =
         try {
             Files.readString(File(pathFor(jarPath)).toPath()).trim().ifEmpty { null }
@@ -114,6 +121,7 @@ object PluginSignatureSidecar {
      * calls this, so pairing them here is what keeps [markUnsignable] from needing
      * cleanup obligations of its own at four separate call sites.
      */
+    @Synchronized
     fun delete(jarPath: String) {
         File(pathFor(jarPath)).delete()
         File(unsignablePathFor(jarPath)).delete()

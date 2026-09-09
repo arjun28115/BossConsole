@@ -259,6 +259,9 @@ jobs:
           path: |
             **/build/test-results/test/
             **/build/reports/tests/test/
+            **/build/test-results/desktopTest/
+            **/build/reports/tests/desktopTest/
+            **/build/reports/tests/allTests/
           retention-days: 7
 
       - name: 📦 Upload Build Artifacts

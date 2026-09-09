@@ -124,8 +124,8 @@ class ConcurrentSidecarWriteTest {
                             runCatching { PluginSignatureSidecar.write(jar.absolutePath, if (i % 2 == 0) a else b) }
                                 .onFailure { failures.add(it) }
                             val read = PluginSignatureSidecar.read(jar.absolutePath)
-                            if (read != null && read != a && read != b) {
-                                failures.add(AssertionError("torn sidecar of length ${read.length}"))
+                            if (read != a && read != b) {
+                                failures.add(AssertionError("missing or torn sidecar of length ${read?.length}"))
                             }
                         }
                     }
@@ -138,7 +138,7 @@ class ConcurrentSidecarWriteTest {
             pool.shutdownNow()
         }
 
-        assertEquals(emptyList(), failures.toList(), "writes must neither throw nor tear")
+        assertTrue(failures.isEmpty(), failures.joinToString("\n") { it.stackTraceToString() })
         assertTrue(PluginSignatureSidecar.read(jar.absolutePath) in listOf(a, b))
     }
 
