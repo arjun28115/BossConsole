@@ -48,7 +48,8 @@ private const val KEY_RENDER_PREFIX = "Key: "
  * headless test and "⇥" in a running app. Anything PERSISTING a name wants the fold, not this.
  *
  * `Key.keyCode` is a packed Long rather than a name, so it is a last resort here and only for a
- * key Compose itself cannot name, where `toString()` already renders the bare number.
+ * future rendering that does not carry this prefix. Current Compose desktop always prefixes
+ * the text; unnamed native codes render as AWT diagnostic strings instead of numbers.
  */
 internal fun composeKeyName(key: Key): String {
     val rendered = key.toString()
@@ -219,11 +220,8 @@ private val KEY_ALIASES: Map<String, String> =
         alias("closebracket", "close bracket", "right bracket", "rightbracket", "]")
         // Shift+/ reports "?" on a US layout.
         alias("slash", "/", "?")
-        // "Back Slash" is Compose's cold spelling for `Key.Backslash`, the same spaced shape as
-        // the bracket keys above. Unlike the glyphs below this one is not reachable in a running
-        // app, which renders "\" - already folded here. It is kept because the cold spelling is
-        // what a headless or pre-toolkit path sees, and a fold that covers one of a key's two
-        // real spellings is the state every entry in this table was added to leave.
+        // AWT can name this key "Back Slash" while hand-edited files use the character.
+        // Accept both without depending on whether a platform installs a display override.
         alias("backslash", "back slash", "\\")
         alias("semicolon", ";")
         alias("comma", ",")

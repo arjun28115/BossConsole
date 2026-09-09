@@ -4,8 +4,11 @@ import ai.rever.boss.keymap.model.canonicalKeyName
 import ai.rever.boss.keymap.model.composeKeyName
 import ai.rever.boss.window.AWTKeyboardInterceptor
 import androidx.compose.ui.input.key.Key
+import java.awt.GraphicsEnvironment
+import java.awt.Toolkit
 import kotlin.test.Test
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeFalse
 import java.awt.event.KeyEvent as AwtKeyEvent
 
 /**
@@ -23,7 +26,7 @@ import java.awt.event.KeyEvent as AwtKeyEvent
  * So it is a canary over the real vocabulary rather than a fixed list, and `CanonicalKeyNameTest`
  * carries the enumerated spellings that a single run cannot be trusted to reach.
  *
- * They had drifted on fourteen keys when this was written - the nine macOS glyphs a running app
+ * They had fourteen spelling divergences over twelve keys when this was written - the nine macOS glyphs a running app
  * renders (Enter, Escape, Tab, Backspace, Delete, Home, End, PageUp, PageDown) and five cold
  * spellings (`Back Slash`, `Quote`, `Back Quote`, `Page Up`, `Page Down`) - on top of the
  * "Left"/"DirectionLeft" and bracket-pair gaps found before it. The glyphs were the reachable
@@ -135,6 +138,13 @@ class KeyVocabularyAgreementTest {
                 "does nothing wherever the other path is the one listening:\n" +
                 disagreements.joinToString("\n"),
         )
+    }
+
+    @Test
+    fun `both paths agree after the platform toolkit installs its key names`() {
+        assumeFalse(GraphicsEnvironment.isHeadless())
+        Toolkit.getDefaultToolkit()
+        `both paths name the same physical key the same key`()
     }
 
     @Test
