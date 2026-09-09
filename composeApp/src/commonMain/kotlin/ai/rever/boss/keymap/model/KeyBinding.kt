@@ -101,7 +101,9 @@ internal fun keyNameForStoredKeyCode(stored: String): String? {
     return stored
         .toLongOrNull()
         ?.let { composeKeyName(Key(it)) }
-        ?.takeIf { it != stored }
+        // AWT names unknown codes with a diagnostic placeholder. That is not a recoverable
+        // key name and must not replace the original value in a user's settings file.
+        ?.takeIf { it != stored && !it.startsWith("Unknown keyCode:", ignoreCase = true) }
         ?.let { canonicalKeyName(it) }
 }
 

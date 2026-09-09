@@ -117,6 +117,13 @@ class CanonicalKeyNameTest {
     }
 
     @Test
+    fun `an unknown native code is not rewritten to an AWT diagnostic`() {
+        val unknown = "4294967295"
+        assertEquals(unknown, canonicalKeyName(unknown))
+        assertEquals(unknown, canonicalKeyName(canonicalKeyName(unknown)))
+    }
+
+    @Test
     fun `an unknown name canonicalises to itself, case-folded`() {
         // What makes the presets' own vocabulary the default answer rather than a special case.
         assertEquals(canonicalKeyName("F7"), canonicalKeyName("f7"))
