@@ -4,6 +4,7 @@ import ai.rever.boss.components.bars.horizontal.StatusMessageManager
 import ai.rever.boss.components.dialogs.CloneProjectDialog
 import ai.rever.boss.components.dialogs.ConfirmationDialog
 import ai.rever.boss.components.dialogs.GlobalSearchDialog
+import ai.rever.boss.components.dialogs.HtmlFileOpenDialog
 import ai.rever.boss.components.dialogs.LogoutConfirmationDialog
 import ai.rever.boss.components.dialogs.NewProjectWizardDialog
 import ai.rever.boss.components.dialogs.NewTabDialog
@@ -23,6 +24,7 @@ import ai.rever.boss.components.plugin.DynamicPluginManager
 import ai.rever.boss.components.plugin.MissingDependencyDialog
 import ai.rever.boss.components.plugin.MissingHandlerPluginDialog
 import ai.rever.boss.components.plugin.MissingHandlerPluginEventBus
+import ai.rever.boss.components.plugin.PanelIds
 import ai.rever.boss.components.plugin.PluginDependencyEventBus
 import ai.rever.boss.components.plugin.PluginLoadGateHost
 import ai.rever.boss.components.plugin.PluginLoadRemedyAccess
@@ -40,6 +42,8 @@ import ai.rever.boss.components.workspaces.SelectWorkspaceDialog
 import ai.rever.boss.components.workspaces.applyWorkspace
 import ai.rever.boss.components.workspaces.workspaceManager
 import ai.rever.boss.dashboard.DashboardStatsManager
+import ai.rever.boss.html.HtmlFileOpenMode
+import ai.rever.boss.html.HtmlFileSettingsManager
 import ai.rever.boss.icons.FileIcons
 import ai.rever.boss.keymap.KeymapSettingsManager
 import ai.rever.boss.keymap.model.KeymapActions
@@ -75,6 +79,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -709,6 +714,21 @@ internal fun BossAppDialogs(state: BossAppState) {
                 coroutineScope.launch { DashboardEventBus.openUrlInNewTab(url, windowId) }
                 state.focusRequester.requestFocus()
             },
+            onMcpToolSelect = { mcp ->
+                state.showGlobalSearchDialog = false
+                // Same verb as onToolSelect: open Toolbox so kill-switches are reachable without a
+                // coding CLI attached (BossConsole#380). Does not invoke the MCP tool.
+                val message =
+                    if (state.draggablePanelComponent.toolboxSidebarItem() != null) {
+                        state.draggablePanelComponent.revealPlugin(PanelIds.PLUGIN_MANAGER.panelId)
+                        "In Toolbox, select MCP and find ${mcp.name} to manage its kill-switch"
+                    } else {
+                        "Toolbox is unavailable in this window; the MCP tool was not run or changed"
+                    }
+                // Status messages are process-wide; only this window reveals Toolbox.
+                StatusMessageManager.showMessage(message, durationMs = 8_000L)
+                state.focusRequester.requestFocus()
+            },
         )
     }
 
@@ -816,6 +836,8 @@ internal fun BossAppDialogs(state: BossAppState) {
             },
         )
     }
+
+    HtmlFilePrompt(state)
 
     // An unload is waiting on this answer: other plugins depend on the one being updated or
     // removed. Both handlers complete the prompt's `answer` before clearing the field - the
@@ -1118,4 +1140,48 @@ internal fun BossAppDialogs(state: BossAppState) {
 
     // Generic dialog host for plugin dialogs
     GenericDialogHostContent()
+}
+
+@Composable
+private fun HtmlFilePrompt(state: BossAppState) {
+    val coroutineScope = state.coroutineScope
+    val splitViewState = state.splitViewState
+    val logger = state.logger
+    state.pendingHtmlFileOpen?.let { request ->
+        key(request) {
+            HtmlFileOpenDialog(
+                fileName = request.fileName,
+                filePath = request.filePath,
+                onDismiss = { state.pendingHtmlFileOpen = null },
+                onOpenChoice = { mode, rememberChoice ->
+                    coroutineScope.launch {
+                        try {
+                            if (rememberChoice) {
+                                HtmlFileSettingsManager.setOpenMode(mode)
+                            }
+                            when (mode) {
+                                HtmlFileOpenMode.EDITOR -> {
+                                    splitViewState.openFileInEditorTab(request.filePath, request.fileName)
+                                }
+
+                                HtmlFileOpenMode.BROWSER -> {
+                                    splitViewState.openFileInBrowserTab(request.filePath, request.fileName)
+                                }
+
+                                HtmlFileOpenMode.ALWAYS_ASK -> {
+                                    Unit
+                                }
+                            }
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            logger.error(LogCategory.FILE, "Unable to open HTML file", error = e)
+                        } finally {
+                            state.pendingHtmlFileOpen = null
+                        }
+                    }
+                },
+            )
+        }
+    }
 }
