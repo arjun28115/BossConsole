@@ -96,15 +96,14 @@ internal fun storedKeyName(key: Key): String = canonicalKeyName(composeKeyName(k
  */
 internal fun keyNameForStoredKeyCode(stored: String): String? {
     if (stored.length < 2 || !stored.all { it.isDigit() }) return null
-    // `takeIf { it != stored }` is checked BEFORE folding: an unnamed keyCode renders as the bare
-    // number, there is nothing to repair, and handing it back to `canonicalKeyName` would spin it
-    // straight through here again.
+    // Check before folding so a numeric rendering cannot recurse through canonicalKeyName.
+    // Current desktop Compose uses an AWT diagnostic for unknown keys instead.
     return stored
         .toLongOrNull()
         ?.let { composeKeyName(Key(it)) }
         // AWT names unknown codes with a diagnostic placeholder. That is not a recoverable
         // key name and must not replace the original value in a user's settings file.
-        ?.takeIf { it != stored && !it.startsWith("Unknown keyCode:", ignoreCase = true) }
+        ?.takeIf { it != stored && !it.contains(" keyCode: 0x", ignoreCase = true) }
         ?.let { canonicalKeyName(it) }
 }
 
