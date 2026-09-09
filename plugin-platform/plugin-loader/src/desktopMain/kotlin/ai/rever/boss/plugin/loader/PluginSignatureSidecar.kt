@@ -85,11 +85,28 @@ object PluginSignatureSidecar {
         }
     }
 
-    /** The stored base64 signature, or null when no sidecar exists. */
-    fun read(jarPath: String): String? {
-        val f = File(pathFor(jarPath))
-        return if (f.exists()) f.readText().trim().ifEmpty { null } else null
-    }
+    /**
+     * The stored base64 signature, or null when no sidecar exists.
+     *
+     * Reads without an `exists()` pre-check on purpose. The pair was a
+     * time-of-check-to-time-of-use race against [write]: `Files.move` with
+     * `REPLACE_EXISTING` transiently unlinks the target on Windows, so a reader
+     * that passed `exists()` could reach `readText()` after the unlink and throw
+     * `FileNotFoundException` out of what every caller treats as a total
+     * function. Caught on the Windows CI leg by ConcurrentSidecarWriteTest, which
+     * exists for the write side of this same race.
+     *
+     * Every failure therefore reads as "no sidecar", which is the safe direction
+     * and matches the policy the rest of this file states: a MISSING sidecar is
+     * warn-and-allow, while a present-but-invalid one hard-fails at load. It
+     * grants nobody anything new, since anyone able to make a sidecar unreadable
+     * could delete it instead.
+     */
+    fun read(jarPath: String): String? =
+        runCatching { File(pathFor(jarPath)).readText() }
+            .getOrNull()
+            ?.trim()
+            ?.ifEmpty { null }
 
     /**
      * Remove a sidecar (e.g. alongside a rejected/purged JAR). Best-effort.
