@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin
 
+import ai.rever.boss.components.plugin.RetiredPluginIds
 import ai.rever.boss.plugin.api.PluginManifest
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import java.io.File
@@ -131,5 +132,25 @@ class StoreRepairArtifactTest {
                 }
                 assertTrue(part.exists())
             }
+        }
+
+    @Test
+    fun `retired plugin repair stops only once its replacement is installed at the required floor`() {
+        val retired = RetiredPluginIds.ALL.first()
+        val candidate = plugin.copy(pluginId = retired.pluginId)
+        assertFalse(StoreRepairArtifact.supports(candidate) { retired.minReplacementVersion })
+        assertTrue(StoreRepairArtifact.supports(candidate) { null })
+        assertTrue(StoreRepairArtifact.supports(candidate) { "0.0.0" })
+    }
+
+    @Test
+    fun `unparseable operator floor remains a distinct fail closed refusal`() =
+        withDownload { part ->
+            val error =
+                assertFailsWith<IllegalArgumentException> {
+                    StoreRepairArtifact.promote(plugin.copy(minVersion = "v2.0.0"), part, manifest(), "2.0.0")
+                }
+            assertEquals("Invalid system plugin version floor", error.message)
+            assertTrue(part.exists())
         }
 }

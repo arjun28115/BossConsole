@@ -2,6 +2,7 @@ package ai.rever.boss.plugin
 
 import ai.rever.boss.config.GitHubConfig
 import ai.rever.boss.config.SupabaseClientConfig
+import ai.rever.boss.plugin.loader.PluginManifestReader
 import ai.rever.boss.plugin.loader.PluginSignatureEnforcement
 import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import ai.rever.boss.plugin.loader.PluginStoreTrust
@@ -1077,7 +1078,9 @@ object PluginStoreSetup {
     private fun installedJarFor(plugin: SystemPluginInfo): File? =
         _pluginDir.listFiles()?.firstOrNull { file ->
             file.name.endsWith(".jar") &&
-                runCatching { readPluginManifest(file)?.pluginId == plugin.pluginId }.getOrDefault(false)
+                runCatching {
+                    PluginManifestReader.readFromJar(file.absolutePath).pluginId == plugin.pluginId
+                }.getOrDefault(false)
         }
 
     /** JARs the GitHub path could not supply, to retry through the store. */
@@ -1112,9 +1115,9 @@ object PluginStoreSetup {
      * store moments later. Treating the miss as terminal is what leaves a
      * signed-in BOSS without a terminal, a browser or an editor.
      *
-     * Deliberately NOT called from the `minVersion` branch. That one refuses a
-     * release the host has declared too old, and reaching around it to the store
-     * would install the exact contract-breaking JAR the gate exists to prevent.
+     * This pass repairs missing plugins, not upgrades of JARs already on disk.
+     * Version/IPC refusals in the GitHub path retain their existing policy. Store
+     * downloads independently enforce those gates before publishing any bytes.
      */
     private fun noteStoreRepairable(
         plugin: SystemPluginInfo,
@@ -1122,6 +1125,8 @@ object PluginStoreSetup {
     ) {
         if (!StoreRepairArtifact.supports(plugin)) return
         storeRepairQueue.add(plugin to reason)
+        // Never await here: GitHub holds the per-plugin lock, and the drain takes
+        // storeRepairMutex before that lock. An inline drain would close a lock cycle.
         scope.launch { maybeDrainStoreRepair() }
     }
 
@@ -1451,6 +1456,7 @@ object PluginStoreSetup {
                             "file" to tmpFile.absolutePath,
                         ),
                     )
+                    noteStoreRepairable(plugin, "GitHub downloaded an empty or missing JAR")
                     return@withSystemPluginDownloadLock false
                 }
 
@@ -1590,6 +1596,7 @@ object PluginStoreSetup {
                 // caller would see `false` and carry on as though the scope lived.
                 throw e
             } catch (e: Exception) {
+                queueStoreRepairAfterGitHubFailure(e) { reason -> noteStoreRepairable(plugin, reason) }
                 logger.error(
                     LogCategory.SYSTEM,
                     "Failed to download system plugin from GitHub",
