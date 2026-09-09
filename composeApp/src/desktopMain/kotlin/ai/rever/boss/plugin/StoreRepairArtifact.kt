@@ -34,14 +34,17 @@ internal object StoreRepairArtifact {
         // Keep the unique download basename: never overwrite a concurrent install or a loaded JAR.
         val target = File(downloaded.parentFile, downloaded.name.removeSuffix(".part"))
         check(!target.exists()) { "Repair destination already exists" }
+        var published = false
         try {
             // Sign first, publish last. Startup cannot scan the new JAR before its sidecar exists.
             PluginSignatureSidecar.persist(target.absolutePath, PluginSignatureSidecar.read(downloaded.absolutePath))
             move(downloaded, target)
-        } catch (failure: Exception) {
-            target.delete()
-            PluginSignatureSidecar.delete(target.absolutePath)
-            throw failure
+            published = true
+        } finally {
+            if (!published) {
+                target.delete()
+                PluginSignatureSidecar.delete(target.absolutePath)
+            }
         }
         PluginSignatureSidecar.delete(downloaded.absolutePath)
         return target

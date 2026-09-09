@@ -14,8 +14,16 @@ import kotlin.test.assertTrue
 class StoreRepairArtifactTest {
     private val plugin = SystemPluginInfo("test.plugin", "test/repo", "test-plugin", 0, minVersion = "2.0.0")
 
-    private fun manifest(id: String = plugin.pluginId, version: String = "2.0.0") =
-        PluginManifest(pluginId = id, displayName = "Test", version = version, apiVersion = "1.0.0", mainClass = "test.Main")
+    private fun manifest(
+        id: String = plugin.pluginId,
+        version: String = "2.0.0",
+    ) = PluginManifest(
+        pluginId = id,
+        displayName = "Test",
+        version = version,
+        apiVersion = "1.0.0",
+        mainClass = "test.Main",
+    )
 
     private fun withDownload(block: (File) -> Unit) {
         val dir = Files.createTempDirectory("store-repair-test").toFile()
@@ -33,11 +41,12 @@ class StoreRepairArtifactTest {
     fun `signature is available before jar becomes scannable`() =
         withDownload { part ->
             assertFalse(part.name.endsWith(".jar"))
-            val target = StoreRepairArtifact.promote(plugin, part, manifest(), "2.0.0") { source, dest ->
-                assertFalse(dest.exists())
-                assertEquals("test-signature", PluginSignatureSidecar.read(dest.absolutePath))
-                Files.move(source.toPath(), dest.toPath())
-            }
+            val target =
+                StoreRepairArtifact.promote(plugin, part, manifest(), "2.0.0") { source, dest ->
+                    assertFalse(dest.exists())
+                    assertEquals("test-signature", PluginSignatureSidecar.read(dest.absolutePath))
+                    Files.move(source.toPath(), dest.toPath())
+                }
             assertEquals("verified download bytes", target.readText())
             assertEquals("test-signature", PluginSignatureSidecar.read(target.absolutePath))
             assertFalse(part.exists())
@@ -69,7 +78,9 @@ class StoreRepairArtifactTest {
     @Test
     fun `wrong plugin identity never gets published`() =
         withDownload { part ->
-            assertFailsWith<IllegalArgumentException> { StoreRepairArtifact.promote(plugin, part, manifest("other"), "2.0.0") }
+            assertFailsWith<IllegalArgumentException> {
+                StoreRepairArtifact.promote(plugin, part, manifest("other"), "2.0.0")
+            }
             assertTrue(part.exists())
         }
 
@@ -101,6 +112,7 @@ class StoreRepairArtifactTest {
             assertEquals("existing jar", existing.readText())
             assertEquals("existing-signature", PluginSignatureSidecar.read(existing.absolutePath))
         }
+
     @Test
     fun `bootstrap artifacts are not repaired through ordinary store installation`() {
         assertFalse(StoreRepairArtifact.supports(plugin.copy(downloadOnly = true)))
@@ -120,5 +132,4 @@ class StoreRepairArtifactTest {
                 assertTrue(part.exists())
             }
         }
-
 }
