@@ -189,13 +189,6 @@ object ShortcutTestRunner {
         return result
     }
 
-    private fun invalidKeyReason(keyName: String): String? =
-        when {
-            looksLikePackedKeyCode(keyName) -> "Stored as a raw key code ('$keyName') - re-record this shortcut"
-            keyName.isBlank() && !isKnownKeyName(keyName) -> "Empty key name - re-record this shortcut"
-            else -> null
-        }
-
     /** Whether a numeric key remains unresolved by the same fold the matchers use. */
     internal fun looksLikePackedKeyCode(keyName: String): Boolean =
         keyName.length >= 2 && keyName.all { it.isDigit() } && canonicalKeyName(keyName) == keyName
@@ -345,3 +338,10 @@ data class TestProgress(
     val isComplete: Boolean
         get() = completed >= total && total > 0
 }
+
+private fun invalidKeyReason(keyName: String): String? =
+    when {
+        ShortcutTestRunner.looksLikePackedKeyCode(keyName) -> "Stored as a raw key code ('$keyName') - re-record this shortcut"
+        keyName.isBlank() && !isKnownKeyName(keyName) -> "Empty key name - re-record this shortcut"
+        else -> null
+    }
