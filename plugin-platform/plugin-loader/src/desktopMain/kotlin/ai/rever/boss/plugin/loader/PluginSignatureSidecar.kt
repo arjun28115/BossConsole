@@ -122,8 +122,8 @@ object PluginSignatureSidecar {
      * BossConsole#108.
      *
      * Self-invalidating: the anchor carries pluginId, version and digest, so any
-     * replacement of the JAR or its store row stops matching and the lookup runs
-     * again.
+     * change to the local identity, version or digest allows another lookup.
+     * A corrected store row alone does not invalidate the marker; remove it to retry.
      */
     fun markUnsignable(
         jarPath: String,

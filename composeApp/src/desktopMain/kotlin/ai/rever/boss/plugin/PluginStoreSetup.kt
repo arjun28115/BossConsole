@@ -25,8 +25,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.URL
@@ -310,12 +308,10 @@ object PluginStoreSetup {
                     // Signature backfill waits for this token: the store's
                     // install-permission gate 403s an unauthenticated caller, so
                     // running it earlier would fail forever for exactly the
-                    // plugins that need it. No longer once-per-process: this is
-                    // one of several triggers, and the drain decides for itself
-                    // whether there is anything to do — see
-                    // maybeDrainSidecarBackfill.
-                    if (token != null) {
-                        scope.launch { maybeDrainSidecarBackfill() }
+                    // plugins that need it. Once per process — see
+                    // drainSidecarBackfill.
+                    if (token != null && sidecarBackfillStarted.compareAndSet(false, true)) {
+                        scope.launch { drainSidecarBackfill() }
                     }
                 }
             }
@@ -655,14 +651,6 @@ object PluginStoreSetup {
                 )
             } finally {
                 flag.set(false)
-                // Anything this check made the drain defer is now eligible. Without
-                // this the re-queue in maybeDrainSidecarBackfill would just park
-                // items until some unrelated trigger happened along.
-                //
-                // Launched rather than awaited: a `finally` reached by cancellation
-                // cannot suspend, and the drain's own network calls have no business
-                // extending this check's lifetime.
-                scope.launch { maybeDrainSidecarBackfill() }
             }
         }
     }
@@ -805,11 +793,6 @@ object PluginStoreSetup {
         // Hashed once, up front, so the same digest both resolves the signature
         // and proves afterwards that the bytes never moved underneath us.
         val manifest = readPluginManifest(jarFile)
-        // Stamped BEFORE the hash, so a replacement landing during the read is
-        // caught: the stamp then belongs to the old file and cannot match the new
-        // one afterwards. Stamping after would sample the replacement and agree
-        // with itself.
-        val stampBeforeHash = stampOf(jarFile)
         val resolvedAgainstSha = manifest?.let { runCatching { sha256Of(jarFile) }.getOrNull() }
         if (manifest == null || resolvedAgainstSha == null) {
             // Never clear here. Both callers guarantee no sidecar is present, so
@@ -830,9 +813,9 @@ object PluginStoreSetup {
         // the JAR at this exact filename meanwhile (a same-version re-download
         // reuses the name). Writing then would pair an old signature with new
         // bytes — present-but-invalid, a permanent load failure, and precisely the
-        // state this whole change exists to prevent. Checking is cheap next to
+        // state this whole change exists to prevent. Re-hashing is cheap next to
         // the round trip that preceded it.
-        if (!stillMatchesResolvedBytes(jarFile, stampBeforeHash)) {
+        if (!stillMatchesResolvedBytes(jarFile, resolvedAgainstSha)) {
             logger.warn(
                 LogCategory.SYSTEM,
                 "System plugin left unsigned - JAR changed while its signature was being fetched",
@@ -863,7 +846,7 @@ object PluginStoreSetup {
      * failing to answer and must stay retryable. Collapsing both to null is what
      * made the mismatch case re-cost a `getDownloadUrl` on every launch.
      */
-    private sealed interface StoreSignatureOutcome {
+    internal sealed interface StoreSignatureOutcome {
         data class Signed(
             val signatureBase64: String,
         ) : StoreSignatureOutcome
@@ -882,10 +865,11 @@ object PluginStoreSetup {
      * the caller should not have to re-derive: whether "no signature" is a settled
      * answer worth remembering, or a transient one that must stay retryable.
      */
-    private suspend fun resolveSignatureToBind(
+    internal suspend fun resolveSignatureToBind(
         jarFile: File,
         manifest: ai.rever.boss.plugin.api.PluginManifest,
         localSha256: String,
+        fetch: suspend (String, String, String) -> StoreSignatureOutcome = ::fetchStoreSignature,
     ): String? {
         val anchor = PluginStoreTrust.versionAnchor(manifest.pluginId, manifest.version, localSha256)
         if (PluginSignatureSidecar.isKnownUnsignable(jarFile.absolutePath, anchor)) {
@@ -897,7 +881,7 @@ object PluginStoreSetup {
             return null
         }
 
-        return when (val outcome = fetchStoreSignature(manifest.pluginId, manifest.version, localSha256)) {
+        return when (val outcome = fetch(manifest.pluginId, manifest.version, localSha256)) {
             is StoreSignatureOutcome.Signed -> {
                 outcome.signatureBase64
             }
@@ -994,74 +978,19 @@ object PluginStoreSetup {
         localSha256: String,
     ): String? = if (storeSha256.equals(localSha256, ignoreCase = true)) storeSignature else null
 
-    /**
-     * A cheap stand-in for "these are still the bytes we hashed": size plus mtime,
-     * snapshotted next to the hash and compared after.
-     *
-     * Both system-plugin replacement paths go through `Files.move` or `copyTo` onto
-     * the same filename, and neither can land without changing `lastModified` — so
-     * a mismatch here catches exactly what the second full SHA-256 pass caught, at
-     * a stat instead of a re-read. That matters on this path specifically: it runs
-     * during startup, over JARs as large as editor-tab and fluck-browser, and the
-     * original hash has already read every byte once.
-     *
-     * This is deliberately not a tamper check. The risk being managed is a
-     * concurrent writer in our own process, not a local attacker — anyone who can
-     * rewrite a JAR in the plugin dir can also set its mtime back, and the store
-     * signature is what actually establishes authenticity at load time.
-     *
-     * Known limit: `lastModified` is millisecond-resolution, so a replacement that
-     * keeps the length AND lands within the same millisecond as the stamp reads as
-     * unchanged, where the full re-hash would have caught it. The window here is
-     * opened by a store round trip and closed after it, so that collision is not
-     * reachable on this path. Pinned by JarBytesStampTest so it stays a known trade
-     * rather than a surprise.
-     *
-     * The other direction changed too, and deliberately: a re-download of the SAME
-     * version produces identical bytes but a fresh mtime, which the digest compare
-     * accepted and this rejects. That errs toward leaving the JAR unsigned, which
-     * is warn-and-allow and retried on the next launch, rather than toward binding
-     * a signature across a replacement we did not observe.
-     */
-    internal data class JarBytesStamp(
-        val length: Long,
-        val lastModified: Long,
-    )
-
-    internal fun stampOf(jarFile: File) = JarBytesStamp(jarFile.length(), jarFile.lastModified())
-
-    /** True when [jarFile] still matches [stamp]; false if it was replaced or is gone. */
+    /** True when [jarFile] still hashes to [expectedSha256]; false if it moved or is unreadable. */
     internal fun stillMatchesResolvedBytes(
         jarFile: File,
-        stamp: JarBytesStamp,
-    ): Boolean = jarFile.exists() && stampOf(jarFile) == stamp
+        expectedSha256: String,
+    ): Boolean = runCatching { sha256Of(jarFile).equals(expectedSha256, ignoreCase = true) }.getOrDefault(false)
 
-    /** JARs seen without a sidecar, drained by [maybeDrainSidecarBackfill]. */
+    /** JARs seen without a sidecar, drained once by [drainSidecarBackfill]. */
     private val sidecarBackfillQueue = java.util.concurrent.ConcurrentLinkedQueue<Pair<String, File>>()
 
-    /**
-     * Serialises drains so two triggers cannot interleave over one queue.
-     *
-     * Every trigger is now free to fire as often as it likes; this is what makes
-     * that safe. It replaces the process-global one-shot `AtomicBoolean`, which
-     * bought the same safety by making the drain unrepeatable — and therefore
-     * missable (see [maybeDrainSidecarBackfill]).
-     */
-    private val sidecarBackfillMutex = Mutex()
-
-    /**
-     * Plugin IDs a signature fetch has already been spent on this process.
-     *
-     * Bounds the retries the repeatable drain now allows. `getDownloadUrl` is not
-     * read-only — it books a row in `plugin_downloads`, which feeds the store's
-     * default `sortBy = "downloads"` ranking — so a plugin whose store artifact
-     * and GitHub asset genuinely differ must not be re-fetched every time
-     * something re-triggers the drain. Marked before the attempt, not after: a
-     * failed fetch has already cost the row.
-     */
-    private val sidecarBackfillAttempted: MutableSet<String> =
-        java.util.concurrent.ConcurrentHashMap
-            .newKeySet()
+    /** The drain runs at most once per process — see [drainSidecarBackfill]. */
+    private val sidecarBackfillStarted =
+        java.util.concurrent.atomic
+            .AtomicBoolean(false)
 
     /**
      * Note an already-installed system plugin whose sidecar is missing.
@@ -1072,10 +1001,9 @@ object PluginStoreSetup {
      * exists. A user already up to date would stay unsigned forever and lose every
      * system plugin — Toolbox included — the moment enforcement flips.
      *
-     * Only queues, then pokes the drain. The work itself belongs to
-     * [maybeDrainSidecarBackfill] because doing it here would run unauthenticated
-     * (see that function) and would race the update check launched immediately
-     * before it.
+     * Only queues. The work is deferred to [drainSidecarBackfill] because doing it
+     * here would run unauthenticated (see that function) and would race the update
+     * check launched immediately before it.
      */
     private fun backfillSidecarIfMissing(
         pluginId: String,
@@ -1083,129 +1011,54 @@ object PluginStoreSetup {
     ) {
         if (PluginSignatureSidecar.read(jarFile.absolutePath) != null) return
         sidecarBackfillQueue.add(pluginId to jarFile)
-        // Enqueueing is itself a trigger. Waiting only on the auth token meant
-        // the queue had to be populated before the token arrived, which is the
-        // ordering that does not hold — see [maybeDrainSidecarBackfill].
-        scope.launch { maybeDrainSidecarBackfill() }
-    }
-
-    /** What [maybeDrainSidecarBackfill] should do with one queued entry. */
-    internal enum class BackfillDisposition {
-        /** Put it back: the answer is not "no", it is "not yet". */
-        DEFER,
-
-        /** Drop it: nothing to do, now or later. */
-        SKIP,
-
-        /** Spend this plugin's one store lookup for the process. */
-        FETCH,
     }
 
     /**
-     * The per-entry decision, extracted so the ordering is pinned by tests rather
-     * than living inside a network call.
+     * Fetch signatures for queued JARs, once, after the store client is authenticated.
      *
-     * The order is the fix. [updateInFlight] must be tested first and must produce
-     * DEFER rather than SKIP: `poll()` has already removed the entry, so the
-     * previous version's `filter` discarded it permanently — and because
-     * `scheduleBackgroundUpdateCheck` raises that flag synchronously one line
-     * before the enqueue, it was the usual case rather than a corner. Every other
-     * condition is genuinely terminal: a JAR that is gone stays gone, a JAR another
-     * path signed needs nothing, and a plugin already charged its one lookup must
-     * not be charged again.
+     * Deferred rather than run at startup for three reasons, all of which made the
+     * naive version fail exactly where it mattered:
      *
-     * [alreadyAttempted] is checked LAST for the same reason. A deferred entry has
-     * not been attempted, so it must survive its wait and still be eligible when
-     * the update check clears.
+     * - **Auth.** [PluginStoreConfig.accessToken] starts null and is only set when
+     *   `sessionStatus` emits, while `ensureSystemPluginsInstalled` runs from
+     *   `initialize()`. The download route 403s an unauthenticated caller for any
+     *   plugin with non-empty `requiredPermissions`, so backfilling at startup would
+     *   deterministically fail for precisely the plugins it targets — every launch,
+     *   forever, never producing a sidecar.
+     * - **Cost.** `getDownloadUrl` is not read-only; it books a row in
+     *   `plugin_downloads`, which feeds the store's default `sortBy = "downloads"`
+     *   ranking. Retrying every launch would fabricate a download per system plugin
+     *   per user forever. Running at most once per process bounds that. A
+     *   signature-only store route would remove it entirely — worth doing, but it's
+     *   an edge-function change and is tracked on BossConsole#102 rather than here.
+     * - **Races.** Draining serially, skipping any plugin whose update check is
+     *   still in flight, keeps this off the JARs [scheduleBackgroundUpdateCheck] is
+     *   replacing underneath it.
      */
-    internal fun backfillDisposition(
-        updateInFlight: Boolean,
-        jarExists: Boolean,
-        hasSidecar: Boolean,
-        alreadyAttempted: Boolean,
-    ): BackfillDisposition =
-        when {
-            updateInFlight -> BackfillDisposition.DEFER
-            !jarExists -> BackfillDisposition.SKIP
-            hasSidecar -> BackfillDisposition.SKIP
-            alreadyAttempted -> BackfillDisposition.SKIP
-            else -> BackfillDisposition.FETCH
-        }
-
-    /**
-     * Fetch signatures for any queued JARs that are ready for one.
-     *
-     * Safe and cheap to call from anywhere, as often as you like: it is guarded by
-     * [sidecarBackfillMutex], returns immediately while unauthenticated, and each
-     * plugin costs at most one store round trip per process
-     * ([sidecarBackfillAttempted]). That is deliberate, because the previous
-     * design's single trigger could not be relied on to fire after the queue was
-     * populated:
-     *
-     * - **The one-shot burned on an empty queue.** The trigger is the first
-     *   non-null token from the `sessionStatus` collector, set up in
-     *   `initialize()`. The path that *enqueues* is `ensureSystemPluginsInstalled`,
-     *   which for the startup case runs lazily on first `DynamicPluginManager`
-     *   access, behind `copyBundledPluginsToPluginDir` and a JAR scan. A returning
-     *   user whose session is restored from local storage can emit `Authenticated`
-     *   first, and a process-global flag spent on an empty queue is spent for good.
-     *   Nothing logged, so the failure looked exactly like success.
-     * - **Late enqueues had no trigger left.** `SystemPluginManifestService`
-     *   re-invokes `ensureSystemPluginsInstalled` when the manifest gains a row.
-     *   Anything queued then arrived after the only trigger had already fired.
-     *
-     * Auth is still a precondition rather than a thing to retry through: the store
-     * download route 403s an unauthenticated caller for any plugin with non-empty
-     * `requiredPermissions`, which is precisely the set this targets. Returning
-     * early leaves the queue intact for the token handler's own trigger.
-     *
-     * A plugin whose update check is in flight is **re-queued rather than dropped**.
-     * The update path signs whatever it installs, so touching a JAR mid-replacement
-     * is how an orphaned or mismatched sidecar gets created — but `poll()` had
-     * already removed the item, so the old `filter` discarded it for the life of the
-     * process. Since `scheduleBackgroundUpdateCheck` sets its in-flight flag
-     * synchronously one line before [backfillSidecarIfMissing] runs, that was the
-     * common case, not the rare one. The check's own `finally` re-triggers a drain,
-     * so re-queued items are picked up when it clears rather than stranded.
-     */
-    private suspend fun maybeDrainSidecarBackfill() {
-        if (sidecarBackfillQueue.isEmpty() || PluginStoreConfig.accessToken == null) return
-        sidecarBackfillMutex.withLock {
-            withContext(Dispatchers.IO) {
-                // Re-read under the lock: the token can be cleared by a sign-out
-                // between the cheap pre-check and here, and draining then would
-                // spend every plugin's one attempt on a guaranteed 403.
-                if (PluginStoreConfig.accessToken == null) return@withContext
-                val deferred = mutableListOf<Pair<String, File>>()
-                while (true) {
-                    val entry = sidecarBackfillQueue.poll() ?: break
-                    val (pluginId, jarFile) = entry
-                    val disposition =
-                        backfillDisposition(
-                            updateInFlight = inFlightUpdateChecks[pluginId]?.get() == true,
-                            jarExists = jarFile.exists(),
-                            hasSidecar = PluginSignatureSidecar.read(jarFile.absolutePath) != null,
-                            alreadyAttempted = pluginId in sidecarBackfillAttempted,
-                        )
-                    when (disposition) {
-                        BackfillDisposition.DEFER -> {
-                            deferred.add(entry)
-                        }
-
-                        BackfillDisposition.SKIP -> {
-                            Unit
-                        }
-
-                        BackfillDisposition.FETCH -> {
-                            sidecarBackfillAttempted.add(pluginId)
-                            persistStoreSignatureSidecar(jarFile)
-                        }
-                    }
-                }
-                sidecarBackfillQueue.addAll(deferred)
-            }
+    private suspend fun drainSidecarBackfill() {
+        withContext(Dispatchers.IO) {
+            generateSequence { sidecarBackfillQueue.poll() }
+                .filter { (pluginId, jarFile) -> stillNeedsSidecar(pluginId, jarFile) }
+                .forEach { (_, jarFile) -> persistStoreSignatureSidecar(jarFile) }
         }
     }
+
+    /**
+     * Whether a queued JAR should still be backfilled, re-evaluated at drain time
+     * rather than when it was queued.
+     *
+     * The update path signs whatever it installs, so a JAR it is currently
+     * replacing needs nothing from us — and touching one mid-replacement is
+     * exactly how an orphaned or mismatched sidecar gets created. The JAR may also
+     * have been removed, or signed by another path, since queueing.
+     */
+    private fun stillNeedsSidecar(
+        pluginId: String,
+        jarFile: File,
+    ): Boolean =
+        inFlightUpdateChecks[pluginId]?.get() != true &&
+            jarFile.exists() &&
+            PluginSignatureSidecar.read(jarFile.absolutePath) == null
 
     /**
      * Download a system plugin from GitHub releases.
