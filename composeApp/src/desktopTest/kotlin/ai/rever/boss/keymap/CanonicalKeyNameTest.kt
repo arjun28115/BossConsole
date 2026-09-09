@@ -118,9 +118,10 @@ class CanonicalKeyNameTest {
 
     @Test
     fun `an unknown native code is not rewritten to an AWT diagnostic`() {
-        val unknown = "4294967295"
-        assertEquals(unknown, canonicalKeyName(unknown))
-        assertEquals(unknown, canonicalKeyName(canonicalKeyName(unknown)))
+        listOf("4294967295", "4311744511").forEach { unknown ->
+            assertEquals(unknown, canonicalKeyName(unknown))
+            assertEquals(unknown, canonicalKeyName(canonicalKeyName(unknown)))
+        }
     }
 
     @Test

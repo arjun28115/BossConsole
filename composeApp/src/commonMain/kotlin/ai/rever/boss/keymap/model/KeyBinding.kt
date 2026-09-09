@@ -100,6 +100,8 @@ internal fun keyNameForStoredKeyCode(stored: String): String? {
     // Current desktop Compose uses an AWT diagnostic for unknown keys instead.
     return stored
         .toLongOrNull()
+        // Native AWT key codes are non-negative; negative low bits can render invalid Unicode.
+        ?.takeIf { it.toInt() >= 0 }
         ?.let { composeKeyName(Key(it)) }
         // AWT names unknown codes with a diagnostic placeholder. That is not a recoverable
         // key name and must not replace the original value in a user's settings file.
