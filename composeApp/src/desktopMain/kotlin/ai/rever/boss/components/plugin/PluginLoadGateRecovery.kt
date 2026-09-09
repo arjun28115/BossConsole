@@ -185,6 +185,7 @@ internal object PluginLoadGateRecovery {
                         version = remedy.availableVersion,
                         sourceUrl = null,
                         runningJarPath = manager.getPluginInfo(ApiClassLoader.API_PLUGIN_ID)?.jarPath,
+                        hasLiveInstance = false,
                     ),
                 unload = { id -> manager.uninstallPlugin(id, force = true).map { } },
                 load = { path -> manager.installPlugin(path).map { true } },
@@ -258,6 +259,7 @@ internal object PluginLoadGateRecovery {
                         // them on disk, which is what makes the gate fire again next launch and is
                         // the outcome we want from a failed repair.
                         runningJarPath = refused,
+                        hasLiveInstance = false,
                     ),
                 unload = { id ->
                     runCatching { manager.uninstallPlugin(id, force = true) }

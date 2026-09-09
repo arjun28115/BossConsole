@@ -83,7 +83,7 @@
     <ID>CyclomaticComplexMethod:AWTKeyboardInterceptor.kt$AWTKeyboardInterceptor$fun install()</ID>
     <ID>CyclomaticComplexMethod:AWTKeyboardInterceptor.kt$AWTKeyboardInterceptor$private fun chordMatchesEvent( modifiers: Collection&lt;String&gt;, event: KeyEvent, ): Boolean</ID>
     <ID>CyclomaticComplexMethod:AWTKeyboardInterceptor.kt$AWTKeyboardInterceptor$internal fun dispatchAction( actionId: String, windowId: String, ): Boolean</ID>
-    <ID>CyclomaticComplexMethod:AWTKeyboardInterceptor.kt$AWTKeyboardInterceptor$private fun getKeyName(keyCode: Int): String</ID>
+    <ID>CyclomaticComplexMethod:AWTKeyboardInterceptor.kt$AWTKeyboardInterceptor$internal fun getKeyName(keyCode: Int): String</ID>
     <ID>CyclomaticComplexMethod:AuthScreenContainer.kt$@Composable fun AuthScreenContainer(onLoginSuccess: () -&gt; Unit)</ID>
     <ID>CyclomaticComplexMethod:BossActionButton.kt$@Composable fun BossActionButton( imageVector: ImageVector? = null, leftLogo: (@Composable () -&gt; Unit)? = null, leftIcon: ImageVector? = null, text: String, fontSize: TextUnit = 13.sp, color: Color = BossTheme.colors.textPrimary, iconColor: Color? = null, // Optional separate icon color (defaults to color if null) iconSize: Dp = 20.dp, // Icon size for imageVector mode maxTextWidth: Dp? = null, // Optional max width for text (truncates with ellipsis) modifier: Modifier = Modifier, contentPadding: PaddingValues = PaddingValues(2.dp), isSelected: Boolean = false, contextMenuItems: List&lt;ContextMenuItem&gt;? = null, contextDirection: Panel = bottom, hintText: String? = null, showHintWithDelay: Boolean = true, hintDirection: Panel = bottom, /** * Sized for a narrow column rather than the top bar. * * The vertical tab bar is 200dp wide and its own rows are 24dp of 10sp text; a control built * for a 40dp horizontal bar sits in it like furniture in the wrong room. Opt-in, so the top * bar - where every one of these numbers was chosen - is untouched. */ compact: Boolean = false, onClick: () -&gt; Unit = {}, )</ID>
     <ID>CyclomaticComplexMethod:BossAppDialogs.kt$@Composable internal fun BossAppDialogs(state: BossAppState)</ID>
@@ -204,7 +204,6 @@
     <ID>ExplicitGarbageCollectionCall:PerformanceMonitor.kt$PerformanceMonitor$gc()</ID>
     <ID>ForbiddenComment:FluckEngine.kt$FluckEngine$// TODO: Implement if needed</ID>
     <ID>ForbiddenComment:FluckEngine.kt$FluckEngine$// TODO: Show user warning dialog (for now, just proceed)</ID>
-    <ID>ForbiddenComment:PluginStateBridge.kt$PluginStateBridge$// TODO: Implement actual JSON Merge Patch for delta state.</ID>
     <ID>ForbiddenComment:VersionVerifier.kt$VersionVerifier$// TODO: Consider adding analytics/crash reporting here</ID>
     <ID>FunctionNaming:MacOSScreenCapture.kt$CoreGraphics$@Suppress("ktlint:standard:function-naming") // JNA maps by native symbol name fun CGPreflightScreenCaptureAccess(): Boolean</ID>
     <ID>FunctionNaming:MacOSScreenCapture.kt$CoreGraphics$@Suppress("ktlint:standard:function-naming") // JNA maps by native symbol name fun CGRequestScreenCaptureAccess(): Boolean</ID>
@@ -237,7 +236,7 @@
     <ID>LargeClass:UpdateScriptGenerator.kt$UpdateScriptGenerator</ID>
     <ID>LongMethod:AWTKeyboardInterceptor.kt$AWTKeyboardInterceptor$fun install()</ID>
     <ID>LongMethod:AWTKeyboardInterceptor.kt$AWTKeyboardInterceptor$internal fun dispatchAction( actionId: String, windowId: String, ): Boolean</ID>
-    <ID>LongMethod:AWTKeyboardInterceptor.kt$AWTKeyboardInterceptor$private fun getKeyName(keyCode: Int): String</ID>
+    <ID>LongMethod:AWTKeyboardInterceptor.kt$AWTKeyboardInterceptor$internal fun getKeyName(keyCode: Int): String</ID>
     <ID>LongMethod:ActionCard.kt$@Composable fun ActionCard( icon: ImageVector, title: String, shortcut: String? = null, onClick: () -&gt; Unit, modifier: Modifier = Modifier, )</ID>
     <ID>LongMethod:AdvancedSettings.kt$@Composable fun AdvancedSettings()</ID>
     <ID>LongMethod:ApplicationRestarter.kt$ApplicationRestarter$private fun buildRelaunchCommand(): List&lt;String&gt;</ID>

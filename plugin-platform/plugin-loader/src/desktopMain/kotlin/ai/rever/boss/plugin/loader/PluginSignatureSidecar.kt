@@ -3,6 +3,7 @@ package ai.rever.boss.plugin.loader
 import java.io.File
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
+import java.nio.file.NoSuchFileException
 import java.nio.file.StandardCopyOption
 
 /**
@@ -96,17 +97,15 @@ object PluginSignatureSidecar {
      * function. Caught on the Windows CI leg by ConcurrentSidecarWriteTest, which
      * exists for the write side of this same race.
      *
-     * Every failure therefore reads as "no sidecar", which is the safe direction
-     * and matches the policy the rest of this file states: a MISSING sidecar is
-     * warn-and-allow, while a present-but-invalid one hard-fails at load. It
-     * grants nobody anything new, since anyone able to make a sidecar unreadable
-     * could delete it instead.
+     * Only absence is treated as unsigned. Other read failures must propagate so
+     * an existing but unreadable signature does not become warn-and-allow.
      */
     fun read(jarPath: String): String? =
-        runCatching { File(pathFor(jarPath)).readText() }
-            .getOrNull()
-            ?.trim()
-            ?.ifEmpty { null }
+        try {
+            Files.readString(File(pathFor(jarPath)).toPath()).trim().ifEmpty { null }
+        } catch (_: NoSuchFileException) {
+            null
+        }
 
     /**
      * Remove a sidecar (e.g. alongside a rejected/purged JAR). Best-effort.
