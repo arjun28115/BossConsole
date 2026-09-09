@@ -39,9 +39,14 @@ actual fun writeFileContentSafe(
 ): Boolean = guardedWrite(filePath, content)
 
 /**
- * Contains ordinary I/O exceptions and stack/heap exhaustion inside the write operation.
- * Linkage errors and thread termination still propagate. The injectable write allows testing
+ * Contains ordinary I/O exceptions and stack overflow inside the write operation.
+ * Heap exhaustion, linkage errors and thread termination still propagate. The injectable write allows testing
  * these failure paths without exhausting the test JVM's resources.
+ *
+ * Unlike a render recovery (see isUncontainable and WindowExceptionRoute), returning false
+ * does not re-enter the operation that overflowed the stack. OOM remains fatal, matching
+ * CrashDisposition.hasFatalCause; the existing read-side OOM catch is not extended here.
+ * Failure does not imply atomicity: an I/O failure can leave a partially written file.
  *
  * This cannot contain failures upstream of this function. The recursive provider dispatch
  * reported in editor-tab issues #18 and #27 was already fixed by host PR #262.
@@ -50,6 +55,7 @@ actual fun writeFileContentSafe(
 internal fun guardedWrite(
     filePath: String,
     content: String,
+    reportFailure: (String, String, Throwable) -> Unit = ::logWriteFailure,
     write: (File, String) -> Unit = { file, text -> file.writeText(text) },
 ): Boolean =
     try {
@@ -59,13 +65,14 @@ internal fun guardedWrite(
         write(file, content)
         true
     } catch (e: Exception) {
-        logWriteFailure(filePath, content, e)
+        reportFailure(filePath, content, e)
         false
     } catch (e: StackOverflowError) {
-        logWriteFailure(filePath, content, e)
-        false
-    } catch (e: OutOfMemoryError) {
-        logWriteFailure(filePath, content, e)
+        try {
+            reportFailure(filePath, content, e)
+        } catch (_: StackOverflowError) {
+            // Diagnostics may run with little stack left. Do not retry either operation.
+        }
         false
     }
 
