@@ -178,16 +178,10 @@ class ShortcutTesterKeyNamesTest {
     }
 
     @Test
-    fun `a key stored as a raw key code still fails, rather than being softened to a note`() {
-        // The one case the old hand-written check was right about, and the one this PR must not
-        // lose with it: no matcher compares against a number, so such a binding fires on neither
-        // path. A user whose rebind silently does nothing opens this screen to find out why, and
-        // a green row with a parenthetical note is the wrong answer for them.
-        listOf("4294967333", "281474976710721", "12").forEach { stored ->
-            assertTrue(
-                ShortcutTestRunner.looksLikePackedKeyCode(stored),
-                "'$stored' is a packed key code and should still be reported as a failure",
-            )
+    fun `only unresolved numeric keys fail validation`() {
+        assertTrue(ShortcutTestRunner.looksLikePackedKeyCode("999999999999999999999999"))
+        listOf("4294967333", "281474976710721").forEach { stored ->
+            assertTrue(!ShortcutTestRunner.looksLikePackedKeyCode(stored))
         }
     }
 

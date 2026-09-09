@@ -3,6 +3,7 @@ package ai.rever.boss.components.settings.keymap
 import ai.rever.boss.keymap.lifecycle.ShortcutLifecycleManager
 import ai.rever.boss.keymap.model.KeyBinding
 import ai.rever.boss.keymap.model.KeymapSettings
+import ai.rever.boss.keymap.model.canonicalKeyName
 import ai.rever.boss.keymap.model.isKnownKeyName
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
@@ -136,12 +137,8 @@ object ShortcutTestRunner {
             return result
         }
 
-        // Step 4a: a key stored as a packed `Key.keyCode` is the one case that IS decidable, and
-        // it is decidably broken - no matcher compares against a number, so the binding fires on
-        // neither path. This is what every rebind made in the Shortcuts screen wrote before #329,
-        // so it is also the population most likely to be looking at this screen. It keeps a real
-        // verdict; softening it would leave the tester reporting a dead shortcut as healthy to the
-        // exact user who came here to find out why it is dead.
+        // Legacy codes that the matcher can resolve are valid too. Only a code that remains
+        // numeric after canonicalisation can be rejected here.
         if (looksLikePackedKeyCode(binding.key)) {
             val result =
                 ShortcutTestResult(
@@ -191,18 +188,9 @@ object ShortcutTestRunner {
         return result
     }
 
-    /**
-     * Whether [keyName] is a packed `Key.keyCode` written where a name belongs.
-     *
-     * Two or more characters, all digits: the same guard `keyNameForStoredKeyCode` uses, and for
-     * the same reason. No key this build can name is spelled in digits alone, and the
-     * single-digit spellings ("1" for the One key) are real names the fold accepts.
-     *
-     * Note this stays a failure even once the fold learns to resolve these (#374): a keymap
-     * holding a raw key code is a file worth repairing whether or not it currently matches, and
-     * "re-record this shortcut" is the right advice in both worlds.
-     */
-    internal fun looksLikePackedKeyCode(keyName: String): Boolean = keyName.length >= 2 && keyName.all { it.isDigit() }
+    /** Whether a numeric key remains unresolved by the same fold the matchers use. */
+    internal fun looksLikePackedKeyCode(keyName: String): Boolean =
+        keyName.length >= 2 && keyName.all { it.isDigit() } && canonicalKeyName(keyName) == keyName
 
     /**
      * A note about [keyName] if it is not one this build recognises, or null if it is.
