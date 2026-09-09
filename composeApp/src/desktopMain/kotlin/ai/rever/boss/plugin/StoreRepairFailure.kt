@@ -2,7 +2,11 @@ package ai.rever.boss.plugin
 
 import kotlinx.coroutines.CancellationException
 
-/** Transport failures are repairable; cancellation must never enqueue work for another channel. */
+/**
+ * GitHub-path failures are repairable; cancellation must never enqueue another channel.
+ * The caller also catches failures after publication. Those queued entries are safe
+ * no-ops because the drain checks manifest-based presence again before downloading.
+ */
 internal fun queueStoreRepairAfterGitHubFailure(
     failure: Exception,
     enqueue: (String) -> Unit,

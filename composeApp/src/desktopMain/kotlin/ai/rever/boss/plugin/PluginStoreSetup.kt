@@ -1117,8 +1117,10 @@ object PluginStoreSetup {
      * signed-in BOSS without a terminal, a browser or an editor.
      *
      * This pass repairs missing plugins, not upgrades of JARs already on disk.
-     * Version/IPC refusals in the GitHub path retain their existing policy. Store
-     * downloads independently enforce those gates before publishing any bytes.
+     * Version/IPC refusals in the GitHub path retain their existing policy even
+     * when the plugin is absent: selecting an alternative compatible release is
+     * outside this availability fallback. Store downloads independently enforce
+     * those gates before publishing any bytes.
      */
     private fun noteStoreRepairable(
         plugin: SystemPluginInfo,
@@ -1151,7 +1153,9 @@ object PluginStoreSetup {
      * the entry was queued. Between the two, a background update check or a
      * realtime manifest re-run can have installed the plugin by the ordinary
      * route, and downloading a second copy would leave two versions in the plugin
-     * dir for `PluginJarReconciler` to clean up after.
+     * dir for `PluginJarReconciler` to clean up after. This prevents the store
+     * from duplicating a completed GitHub install; GitHub update callers may still
+     * publish a newer release after a store repair, for next-launch reconciliation.
      */
     internal fun repairDisposition(
         jarPresent: Boolean,
@@ -1259,8 +1263,9 @@ object PluginStoreSetup {
             return
         }
 
-        val tmp = File.createTempFile("${plugin.pluginId}-store-repair-", ".jar.part", _pluginDir)
+        var tmp: File? = null
         try {
+            tmp = File.createTempFile("${plugin.pluginId}-store-repair-", ".jar.part", _pluginDir)
             val info = manager.getPlugin(plugin.pluginId).getOrThrow() ?: error("no store row for ${plugin.pluginId}")
             val downloaded = File(manager.downloadPlugin(plugin.pluginId, info.version, tmp.absolutePath).getOrThrow())
             // Another install may have finished while the network call was suspended.
@@ -1289,8 +1294,10 @@ object PluginStoreSetup {
                 mapOf("pluginId" to plugin.pluginId, "githubReason" to reason, "storeError" to e.toString()),
             )
         } finally {
-            tmp.delete()
-            PluginSignatureSidecar.delete(tmp.absolutePath)
+            tmp?.let {
+                it.delete()
+                PluginSignatureSidecar.delete(it.absolutePath)
+            }
         }
     }
 
@@ -1595,7 +1602,6 @@ object PluginStoreSetup {
                 // caller would see `false` and carry on as though the scope lived.
                 throw e
             } catch (e: Exception) {
-                queueStoreRepairAfterGitHubFailure(e) { reason -> noteStoreRepairable(plugin, reason) }
                 logger.error(
                     LogCategory.SYSTEM,
                     "Failed to download system plugin from GitHub",
@@ -1606,6 +1612,7 @@ object PluginStoreSetup {
                     ),
                     e,
                 )
+                queueStoreRepairAfterGitHubFailure(e) { reason -> noteStoreRepairable(plugin, reason) }
                 false
             }
         }
