@@ -575,6 +575,39 @@ logger.error(LogCategory.NETWORK, "Request failed", error = exception)
 
 **Config**: Set `BOSS_LOG_LEVEL` env var or `boss.log.level` system property (TRACE/DEBUG/INFO/WARN/ERROR)
 
+## Browser native disposal
+
+`BrowserHandleImpl.dispose()` invalidates the handle and detaches its UI, then
+`BrowserNativeDisposal` closes the browser only after its owned renderer-call
+executors drain. Direct plugin disposal and host window teardown share this
+boundary. Never replace the drain with a fixed timeout followed by `browser.close()`:
+cancelling a caller's coroutine does not stop a JxBrowser round trip.
+
+`DrainingBrowserExecutor` signals actual executor termination, including failed
+calls and cancelled queued jobs. Waiting suspends in a host-owned scope without
+parking another thread. Keep `executeJavaScript` on `BoundedBrowserCall`: the
+JxBrowser async Consumer overload does not invoke its consumer on RPC error, so
+that callback alone cannot settle a native-operation count.
+
+Profile release must follow `awaitNativeDisposal`, through `disposeBrowserResources`.
+Its cleanup outlives cancellation of the caller. Both service entry points return
+without awaiting native close. A drain pending after ten seconds warns once with
+the handle id, then continues waiting safely.
+
+A genuinely wedged call retains its browser/profile until it returns or engine
+recovery releases it; native-close failure retains the potentially live profile
+and is logged. Keep its fence and `inUse` protection: dropping both would let a
+new browser reuse it or LRU eviction delete it. Named-profile creation/seeding
+waits at most ten seconds to acquire the fence, then reports that it is still in
+use rather than suspending indefinitely.
+
+The process-wide cleanup scopes use daemon threads. The shutdown hook does not
+drain them before forced engine close/process exit, so pending native close and
+profile cleanup can be abandoned at exit. Ephemeral leftovers are reclaimed on
+the next managed-profile creation. This is not a guaranteed shutdown flush. This
+is not an engine-abort mechanism and does not coordinate external raw-JxBrowser
+callers or engine-level forced closure.
+
 ## Browser telemetry, and how to turn it off
 
 The integrated browser reports which sites BOSS is used with and how - page views,
