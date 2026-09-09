@@ -4,11 +4,11 @@ import ai.rever.boss.keymap.model.canonicalKeyName
 import ai.rever.boss.keymap.model.composeKeyName
 import ai.rever.boss.window.AWTKeyboardInterceptor
 import androidx.compose.ui.input.key.Key
+import org.junit.jupiter.api.Assumptions.assumeFalse
 import java.awt.GraphicsEnvironment
 import java.awt.Toolkit
 import kotlin.test.Test
 import kotlin.test.assertTrue
-import org.junit.jupiter.api.Assumptions.assumeFalse
 import java.awt.event.KeyEvent as AwtKeyEvent
 
 /**
