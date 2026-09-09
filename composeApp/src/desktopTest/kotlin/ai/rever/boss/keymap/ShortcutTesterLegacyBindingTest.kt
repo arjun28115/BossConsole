@@ -27,6 +27,16 @@ class ShortcutTesterLegacyBindingTest {
     }
 
     @Test
+    fun `empty keys fail while the literal space alias remains valid`() = runTest {
+        listOf("", "  ", "\t").forEach { key ->
+            val result = ShortcutTestRunner.testShortcut(KeyBinding(actionId = "window.new", key = key))
+            assertEquals(TestStatus.FAILED, result.status)
+        }
+        val space = ShortcutTestRunner.testShortcut(KeyBinding(actionId = "window.new", key = " "))
+        assertEquals(TestStatus.SUCCESS, space.status)
+    }
+
+    @Test
     fun `valid function and punctuation keys pass the actual tester`() = runTest {
         listOf("F5", "F13", "-", "Left Bracket", "MoveHome", "⇥").forEach { key ->
             val result = ShortcutTestRunner.testShortcut(KeyBinding(actionId = "window.new", key = key))

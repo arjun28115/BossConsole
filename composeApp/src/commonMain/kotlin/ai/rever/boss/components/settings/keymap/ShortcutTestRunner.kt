@@ -139,18 +139,19 @@ object ShortcutTestRunner {
 
         // Legacy codes that the matcher can resolve are valid too. Only a code that remains
         // numeric after canonicalisation can be rejected here.
-        if (looksLikePackedKeyCode(binding.key)) {
+        val keyFailure = invalidKeyReason(binding.key)
+        if (keyFailure != null) {
             val result =
                 ShortcutTestResult(
                     actionId = binding.actionId,
                     binding = binding,
                     status = TestStatus.FAILED,
-                    message = "Stored as a raw key code ('${binding.key}') - re-record this shortcut",
+                    message = keyFailure,
                 )
             updateResult(result)
             logger.warn(
                 LogCategory.UI,
-                "Failed (key stored as a raw key code)",
+                "Failed (invalid key name)",
                 mapOf("description" to binding.description, "key" to binding.key),
             )
             return result
@@ -187,6 +188,13 @@ object ShortcutTestRunner {
 
         return result
     }
+
+    private fun invalidKeyReason(keyName: String): String? =
+        when {
+            looksLikePackedKeyCode(keyName) -> "Stored as a raw key code ('$keyName') - re-record this shortcut"
+            keyName.isBlank() && !isKnownKeyName(keyName) -> "Empty key name - re-record this shortcut"
+            else -> null
+        }
 
     /** Whether a numeric key remains unresolved by the same fold the matchers use. */
     internal fun looksLikePackedKeyCode(keyName: String): Boolean =
