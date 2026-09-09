@@ -17,7 +17,6 @@ import ai.rever.boss.plugin.updater.PluginUpdateManager
 import ai.rever.boss.plugin.updater.UpdateCheckerConfig
 import ai.rever.boss.services.supabase.SupabaseConfig
 import ai.rever.boss.utils.AppVersion
-import ai.rever.boss.utils.atomicMoveFrom
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import ai.rever.boss.utils.sha256Of
@@ -368,6 +367,7 @@ object PluginStoreSetup {
 
                     // Signature backfill and store repair both require authentication.
                     sidecarBackfill.setAuthenticated(token != null)
+                    if (token == null) storeRepairAuthenticationLosses.incrementAndGet()
                     if (token != null) {
                         scope.launch { maybeDrainStoreRepair() }
                     }
@@ -1073,20 +1073,11 @@ object PluginStoreSetup {
         sidecarBackfill.enqueue(pluginId, jarFile)
     }
 
-    /**
-     * The JAR already on disk for [plugin], by the same predicate
-     * `ensureSystemPluginsInstalled` uses, or null when none is installed.
-     *
-     * Matching on `artifactPrefix` rather than pluginId is deliberate and is what
-     * the ordinary path does: the two filename conventions in this directory
-     * (`<artifactPrefix>-<version>.jar` from GitHub, `<pluginId>-<version>.jar`
-     * from the store) both start with a prefix, and using the wrong one would
-     * report "not installed" for a JAR that is right there.
-     */
+    /** Match the manifest identity; artifact prefixes can also prefix a different plugin's name. */
     private fun installedJarFor(plugin: SystemPluginInfo): File? =
-        _pluginDir.listFiles()?.firstOrNull {
-            it.name.endsWith(".jar") &&
-                (it.name.startsWith("${plugin.artifactPrefix}-") || it.name.startsWith("${plugin.pluginId}-"))
+        _pluginDir.listFiles()?.firstOrNull { file ->
+            file.name.endsWith(".jar") &&
+                runCatching { readPluginManifest(file)?.pluginId == plugin.pluginId }.getOrDefault(false)
         }
 
     /** JARs the GitHub path could not supply, to retry through the store. */
@@ -1094,6 +1085,8 @@ object PluginStoreSetup {
 
     /** Serialises repair passes so two triggers cannot install the same JAR twice. */
     private val storeRepairMutex = Mutex()
+    private val systemPluginDownloadLocks = ConcurrentHashMap<String, Mutex>()
+    private val storeRepairAuthenticationLosses = AtomicLong()
 
     /**
      * Plugin ids a store repair has already been spent on this process.
@@ -1127,6 +1120,7 @@ object PluginStoreSetup {
         plugin: SystemPluginInfo,
         reason: String,
     ) {
+        if (!StoreRepairArtifact.supports(plugin)) return
         storeRepairQueue.add(plugin to reason)
         scope.launch { maybeDrainStoreRepair() }
     }
@@ -1187,7 +1181,9 @@ object PluginStoreSetup {
                 // Re-read under the lock: a sign-out between the cheap pre-check and
                 // here would spend every plugin's one attempt on a guaranteed 403.
                 if (PluginStoreConfig.accessToken == null) return@withContext
-                generateSequence { storeRepairQueue.poll() }.forEach { (plugin, reason) ->
+                generateSequence {
+                    if (PluginStoreConfig.accessToken != null) storeRepairQueue.poll() else null
+                }.forEach { (plugin, reason) ->
                     val disposition =
                         repairDisposition(
                             jarPresent = installedJarFor(plugin) != null,
@@ -1195,7 +1191,25 @@ object PluginStoreSetup {
                         )
                     if (disposition == RepairDisposition.REPAIR) {
                         storeRepairAttempted.add(plugin.pluginId)
-                        repairFromStore(plugin, reason)
+                        val authenticationGeneration = storeRepairAuthenticationLosses.get()
+                        try {
+                            systemPluginDownloadLocks.computeIfAbsent(plugin.pluginId) { Mutex() }.withLock {
+                                if (PluginStoreConfig.accessToken != null && installedJarFor(plugin) == null) {
+                                    repairFromStore(plugin, reason)
+                                }
+                            }
+                        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                            storeRepairAttempted.remove(plugin.pluginId)
+                            storeRepairQueue.add(plugin to reason)
+                            throw cancelled
+                        }
+                        val lostAuthentication =
+                            PluginStoreConfig.accessToken == null ||
+                                authenticationGeneration != storeRepairAuthenticationLosses.get()
+                        if (lostAuthentication && installedJarFor(plugin) == null) {
+                            storeRepairAttempted.remove(plugin.pluginId)
+                            storeRepairQueue.add(plugin to reason)
+                        }
                     } else {
                         logger.debug(
                             LogCategory.SYSTEM,
@@ -1229,7 +1243,7 @@ object PluginStoreSetup {
         plugin: SystemPluginInfo,
         reason: String,
     ) {
-        val manager = _repositoryManager
+        val manager = _remoteRepository
         if (manager == null) {
             logger.warn(
                 LogCategory.SYSTEM,
@@ -1239,79 +1253,51 @@ object PluginStoreSetup {
             return
         }
 
-        val tmp = File(_pluginDir, "${plugin.pluginId}-store-repair.jar")
-        val outcome =
-            runCatching {
-                val info =
-                    manager.getPlugin(plugin.pluginId).getOrNull()?.plugin
-                        ?: error("no store row for ${plugin.pluginId}")
-                // downloadPlugin enforces the store signature itself, so a repaired
-                // JAR arrives signed even though the GitHub path it replaces does
-                // not carry a sidecar.
-                manager
-                    .downloadPlugin(plugin.pluginId, null, tmp.absolutePath)
-                    .getOrThrow()
-                    .let { File(it) } to info
-            }
-
-        outcome
-            .onSuccess { (downloaded, info) -> placeRepairedJar(plugin, downloaded, info.version, reason) }
-            .onFailure { e ->
-                runCatching { tmp.delete() }
-                logger.warn(
-                    LogCategory.SYSTEM,
-                    "System plugin left uninstalled - GitHub failed and the store could not supply it",
-                    mapOf(
-                        "pluginId" to plugin.pluginId,
-                        "githubReason" to reason,
-                        "storeError" to e.toString(),
-                    ),
+        val tmp = File.createTempFile("${plugin.pluginId}-store-repair-", ".jar.part", _pluginDir)
+        try {
+            val info = manager.getPlugin(plugin.pluginId).getOrThrow() ?: error("no store row for ${plugin.pluginId}")
+            val downloaded = File(manager.downloadPlugin(plugin.pluginId, info.version, tmp.absolutePath).getOrThrow())
+            // Another install may have finished while the network call was suspended.
+            if (installedJarFor(plugin) != null) return
+            val manifest = readPluginManifest(downloaded) ?: error("Store JAR has no readable plugin manifest")
+            val dest = StoreRepairArtifact.promote(plugin, downloaded, manifest, info.version)
+            if (!plugin.downloadOnly) {
+                val existing = PluginPersistence.getInstalledPlugins().find { it.pluginId == plugin.pluginId }
+                PluginPersistence.addInstalledPlugin(
+                    pluginId = plugin.pluginId,
+                    jarPath = dest.absolutePath,
+                    enabled = existing?.enabled ?: true,
+                    sourceUrl = existing?.sourceUrl,
+                    installedVersion = manifest.version,
                 )
             }
+            logger.warn(
+                LogCategory.SYSTEM,
+                "System plugin repaired from the store after GitHub failed - active next launch",
+                mapOf("pluginId" to plugin.pluginId, "version" to manifest.version, "githubReason" to reason),
+            )
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (e: Exception) {
+            logger.warn(
+                LogCategory.SYSTEM,
+                "System plugin left uninstalled - GitHub failed and the store could not supply it",
+                mapOf("pluginId" to plugin.pluginId, "githubReason" to reason, "storeError" to e.toString()),
+            )
+        } finally {
+            tmp.delete()
+            PluginSignatureSidecar.delete(tmp.absolutePath)
+        }
     }
 
-    /**
-     * Move a repaired JAR to its versioned name and record it as installed.
-     *
-     * Split out of [repairFromStore] so each half stays readable: that one owns
-     * the store round trip and its failure reporting, this one owns the
-     * filesystem and persistence.
-     */
-    private fun placeRepairedJar(
+    /** Serialize both download channels per plugin while keeping network and file work on I/O. */
+    private suspend fun <T> withSystemPluginDownloadLock(
         plugin: SystemPluginInfo,
-        downloaded: File,
-        storeVersion: String,
-        reason: String,
-    ) {
-        val version = runCatching { readPluginManifest(downloaded)?.version }.getOrNull() ?: storeVersion
-        val dest = File(_pluginDir, "${plugin.pluginId}-$version.jar")
-        if (downloaded.absolutePath != dest.absolutePath) {
-            // Clear any sidecar beside the destination before the bytes change,
-            // for the same reason the download path does: a crash mid-move would
-            // otherwise pair an old signature with new bytes, which hard-fails at
-            // load rather than degrading to unsigned.
-            runCatching { PluginSignatureSidecar.delete(dest.absolutePath) }
-            runCatching { dest.atomicMoveFrom(downloaded) }
-                .onFailure { downloaded.delete() }
+        action: suspend () -> T,
+    ): T =
+        systemPluginDownloadLocks.computeIfAbsent(plugin.pluginId) { Mutex() }.withLock {
+            withContext(Dispatchers.IO) { action() }
         }
-        if (!plugin.downloadOnly) {
-            val existing = PluginPersistence.getInstalledPlugins().find { it.pluginId == plugin.pluginId }
-            PluginPersistence.addInstalledPlugin(
-                pluginId = plugin.pluginId,
-                jarPath = dest.absolutePath,
-                // Preserve a user's explicit disable: repairing a missing file must
-                // not re-enable something they turned off.
-                enabled = existing?.enabled ?: true,
-                sourceUrl = existing?.sourceUrl,
-                installedVersion = version,
-            )
-        }
-        logger.warn(
-            LogCategory.SYSTEM,
-            "System plugin repaired from the store after GitHub failed - active next launch",
-            mapOf("pluginId" to plugin.pluginId, "version" to version, "githubReason" to reason),
-        )
-    }
 
     /**
      * Download a system plugin from GitHub releases.
@@ -1320,7 +1306,7 @@ object PluginStoreSetup {
      * @return true if download was successful, false otherwise
      */
     private suspend fun downloadSystemPluginFromGitHub(plugin: SystemPluginInfo): Boolean {
-        return withContext(Dispatchers.IO) {
+        return withSystemPluginDownloadLock(plugin) {
             try {
                 val apiUrl = "https://api.github.com/repos/${plugin.githubRepo}/releases/latest"
                 logger.debug(
@@ -1354,7 +1340,7 @@ object PluginStoreSetup {
                         ),
                     )
                     noteStoreRepairable(plugin, "GitHub API rate limit (status $status)")
-                    return@withContext false
+                    return@withSystemPluginDownloadLock false
                 }
                 if (status !in 200..299) {
                     logger.warn(
@@ -1366,7 +1352,7 @@ object PluginStoreSetup {
                         ),
                     )
                     noteStoreRepairable(plugin, "GitHub releases API returned $status")
-                    return@withContext false
+                    return@withSystemPluginDownloadLock false
                 }
 
                 val responseText = connection.inputStream.bufferedReader().readText()
@@ -1393,7 +1379,7 @@ object PluginStoreSetup {
                             "minVersion" to requiredMin,
                         ),
                     )
-                    return@withContext false
+                    return@withSystemPluginDownloadLock false
                 }
 
                 // Find the JAR download URL (skips "-thin.jar" assets — see
@@ -1411,7 +1397,7 @@ object PluginStoreSetup {
                         ),
                     )
                     noteStoreRepairable(plugin, "no JAR asset in GitHub release $tagName")
-                    return@withContext false
+                    return@withSystemPluginDownloadLock false
                 }
                 val jarFileName = jarUrl.substringAfterLast("/")
                 val destFile = File(_pluginDir, jarFileName)
@@ -1465,7 +1451,7 @@ object PluginStoreSetup {
                             "file" to tmpFile.absolutePath,
                         ),
                     )
-                    return@withContext false
+                    return@withSystemPluginDownloadLock false
                 }
 
                 // IPC-compat gate: if the fetched JAR declares a minIpcVersion
@@ -1501,7 +1487,7 @@ object PluginStoreSetup {
                             "reason" to ipcReason,
                         ),
                     )
-                    return@withContext false
+                    return@withSystemPluginDownloadLock false
                 }
 
                 // Atomic rename onto the final path. Overwrite if the file
