@@ -35,11 +35,12 @@ The application features a comprehensive keyboard shortcuts system (Issue #201) 
 4. **BossActionHandler** - Executes the actual action for each shortcut
 
 **Two matchers, not one.** `AWTKeyboardInterceptor` answers from AWT key codes; `KeymapMatcher`
-answers from Compose `KeyEvent`s and serves the Shortcuts screen's tester,
-`KeymapHandler.getMatchingBindings` and the remote-surface key tap. They read the same keymap but
+answers from Compose `KeyEvent`s and serves `KeymapHandler.getMatchingBindings` and the
+remote-surface key tap. The Shortcuts screen's tester performs static configuration checks;
+it does not send a key event through either matcher. They read the same keymap but
 name keys from different sources, which is why the fold described under
 [Key names](#key-names) exists. A chord that works in one place and silently does nothing in
-another is almost always the two disagreeing about what a key is called.
+another can indicate different key names, focus routing, modifiers or lifecycle conditions.
 
 ### Key Components
 
@@ -348,14 +349,14 @@ detection, or compared during preset migration. Case is not significant.
 | Digits | `One` and `1`, `Two` and `2`, and so on |
 | Punctuation | `Minus`/`-`, `Slash`/`/`/`?`, `Backslash`/`\`, `Semicolon`/`;`, `Apostrophe`/`'`, `Comma`/`,`, `Period`/`.`, `Grave`/`` ` `` |
 
-The presets store the first column, which is Compose's `Key` property naming. Prefer it when
-editing by hand: it is what every shipped binding uses, and it is what the Shortcuts screen shows
-back to you.
+Prefer the first spelling in each row when editing by hand, such as `DirectionLeft` or
+`OpenBracket`. These are the spellings used by the presets; the left column groups key types.
 
 **Why there is more than one spelling to fold.** Three sources produce a key name and none of
 them agree:
 
-- **The presets**, which use Compose's property names (`DirectionLeft`, `OpenBracket`).
+- **The presets**, which use names such as `DirectionLeft` and `OpenBracket` (not always
+  the literal Compose property name: Compose calls the bracket key `LeftBracket`).
 - **`AWTKeyboardInterceptor.getKeyName`**, a hand-maintained table over AWT key codes.
 - **`Key.toString()`**, which is where `KeymapMatcher` and the Shortcuts screen get a name.
 
@@ -388,11 +389,13 @@ If shortcuts stop working:
 Common issues:
 - **A shortcut you rebound yourself does nothing.** Open the file and look at its `"key"`. If it
   is a long number (`"key": "4294967333"`), that is a packed `Key.keyCode` rather than a name and
-  no matcher will ever compare against it. Replace it with the key's name from the table under
-  [Key names](#key-names), or delete that entry and let the preset default come back.
+  older builds cannot match it. Builds with the legacy-key repair convert recognised codes
+  during settings migration and at match time. If the code is still unresolved, re-record the
+  shortcut or replace it with a key name from [Key names](#key-names).
 - **A shortcut works in one place but not another.** The two matchers name keys from different
-  sources (see [Key names](#key-names)). A chord that fires normally but reports "no match" in the
-  Shortcuts screen's tester, or that a focused plugin surface swallows, is the signature.
+  sources (see [Key names](#key-names)). Compare focus routing, required modifiers and lifecycle
+  conditions as well as the stored name. A tester result is a configuration check, not proof
+  that an event was dispatched or an action executed.
 - **Stale settings file**: Delete `~/.boss/keymap-settings.json` and restart
 - **Conflicts**: Settings UI shows visual warnings for conflicting shortcuts
 - **Focus mode**: Settings window and shortcuts work in focus mode (fixed in Issue #74)
