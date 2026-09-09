@@ -1,5 +1,6 @@
 package ai.rever.boss.components.settings.keymap
 
+import ai.rever.boss.components.events.MODIFIER_ONLY_KEYS
 import ai.rever.boss.keymap.model.KeyBinding
 import ai.rever.boss.keymap.model.KeyStroke
 import ai.rever.boss.keymap.model.ShortcutContext
@@ -267,17 +268,5 @@ private fun KeyDisplay(
     }
 }
 
-private val modifierOnlyKeys =
-    setOf(
-        Key.MetaLeft,
-        Key.MetaRight,
-        Key.CtrlLeft,
-        Key.CtrlRight,
-        Key.AltLeft,
-        Key.AltRight,
-        Key.ShiftLeft,
-        Key.ShiftRight,
-    )
-
 /** A modifier alone cannot be dispatched by the AWT shortcut interceptor. */
-internal fun isShortcutCaptureKey(key: Key): Boolean = key !in modifierOnlyKeys
+internal fun isShortcutCaptureKey(key: Key): Boolean = key !in MODIFIER_ONLY_KEYS

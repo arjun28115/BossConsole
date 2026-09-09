@@ -38,6 +38,9 @@ class ShortcutCaptureConsumersTest {
         Key.AltRight,
         Key.ShiftLeft,
         Key.ShiftRight,
+        Key.CapsLock,
+        Key.NumLock,
+        Key.ScrollLock,
     )
             .forEach { assertFalse(isShortcutCaptureKey(it), "$it is not an AWT-dispatchable shortcut key") }
         listOf(Key.N, Key.Tab, Key.One, Key.DirectionLeft).forEach { assertTrue(isShortcutCaptureKey(it)) }
