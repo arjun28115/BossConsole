@@ -367,7 +367,10 @@ object PluginStoreSetup {
                     )
                     PluginStoreConfig.accessToken = token
 
-                    // Signature backfill and store repair both require authentication.
+                    // Signature backfill and store repair wait for this token because the
+                    // store's install-permission gate rejects unauthenticated callers.
+                    // Recording readiness also wakes JARs queued after an earlier
+                    // authenticated emission.
                     sidecarBackfill.setAuthenticated(token != null)
                     if (token == null) {
                         storeRepairAuthenticationLosses.incrementAndGet()
