@@ -20,16 +20,18 @@
 --   held. One re-granted verb would pass an ALL-shaped assertion while leaving
 --   the hole open.
 --
---   NOT COVERED, and worth stating so nobody assumes otherwise: service_role
---   bypasses RLS entirely, so the plugin_api_key_logs policy scoped `TO
---   service_role` is belt and braces and asserting it proves nothing about the
---   real write path. log_api_key_action() is SECURITY DEFINER and would keep
---   working with no policy at all. It is asserted below only so that a future
---   change which drops the definer attribute does not silently lose the ability
---   to write.
+--   NOT COVERED by the policy assertions, and worth stating so nobody assumes
+--   otherwise: service_role bypasses RLS entirely, so the plugin_api_key_logs
+--   policy scoped `TO service_role` is belt and braces and asserting it proves
+--   nothing about the real write path. log_api_key_action() is SECURITY
+--   DEFINER and would keep working with no policy at all. It is asserted below
+--   only so that a future change which drops the definer attribute does not
+--   silently lose the ability to write. The RPC's EXECUTE grants (PUBLIC,
+--   anon, authenticated revoked; service_role kept) ARE asserted, because that
+--   is what actually stops a client from calling the definer writer.
 
 begin;
-select plan(19);
+select plan(20);
 
 -- ---------------------------------------------------------------------------
 -- Row level security is still on. Everything below is meaningless without it.
@@ -48,30 +50,16 @@ select is(
 );
 
 -- ---------------------------------------------------------------------------
--- secret_access_log: the INSERT policy is scoped and no longer unconditional.
+-- secret_access_log: the unconditional INSERT policy is gone, and no
+-- client-scoped replacement remains - with no INSERT privilege, no client
+-- policy could ever fire, so a leftover one would be misleading dead code.
 -- ---------------------------------------------------------------------------
 
-select is(
-    (select roles::text from pg_policies
-      where schemaname = 'public' and tablename = 'secret_access_log'
-        and policyname = 'secret_access_log_insert'),
-    '{authenticated}',
-    'the secret_access_log INSERT policy names authenticated, not PUBLIC'
-);
-
-select ok(
-    (select with_check like '%uid()%' from pg_policies
-      where schemaname = 'public' and tablename = 'secret_access_log'
-        and policyname = 'secret_access_log_insert'),
-    'the secret_access_log INSERT predicate ties the row to the caller'
-);
-
-select isnt(
-    (select with_check from pg_policies
-      where schemaname = 'public' and tablename = 'secret_access_log'
-        and policyname = 'secret_access_log_insert'),
-    'true',
-    'the secret_access_log INSERT predicate is no longer unconditional'
+select is_empty(
+    $$ select policyname from pg_policies
+       where schemaname = 'public' and tablename = 'secret_access_log'
+         and policyname = 'secret_access_log_insert' $$,
+    'no INSERT policy remains on secret_access_log'
 );
 
 -- The read policy is untouched. A fix that quietly removed it would hide the
@@ -118,8 +106,8 @@ select ok(
 );
 
 select ok(
-    has_table_privilege('authenticated', 'public.secret_access_log', 'INSERT'),
-    'authenticated can still log an operation, which the secret functions rely on'
+    not has_table_privilege('authenticated', 'public.secret_access_log', 'INSERT'),
+    'authenticated cannot insert into the secret audit log; every writer is SECURITY DEFINER'
 );
 
 select ok(
@@ -152,6 +140,25 @@ select ok(
 select ok(
     not has_table_privilege('authenticated', 'public.plugin_api_key_logs', 'INSERT'),
     'authenticated cannot forge API key usage history either'
+);
+
+-- The definer writer must not be callable by clients: EXECUTE is granted to
+-- PUBLIC by default and to anon/authenticated via the schema-wide default
+-- privileges, so all three revokes are asserted. Without this, the RPC forges
+-- rows for any api_key_id even with the table locked.
+select ok(
+    not has_function_privilege('anon', 'public.log_api_key_action(uuid, text, text, text, text, boolean, text)', 'EXECUTE'),
+    'anon cannot execute the API key log RPC'
+);
+
+select ok(
+    not has_function_privilege('authenticated', 'public.log_api_key_action(uuid, text, text, text, text, boolean, text)', 'EXECUTE'),
+    'authenticated cannot execute the API key log RPC either'
+);
+
+select ok(
+    has_function_privilege('service_role', 'public.log_api_key_action(uuid, text, text, text, text, boolean, text)', 'EXECUTE'),
+    'service_role can still execute the API key log RPC'
 );
 
 select ok(

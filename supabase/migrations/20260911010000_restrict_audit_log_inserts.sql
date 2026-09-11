@@ -29,14 +29,29 @@
 -- named "Service role can insert API key logs", which is what it was meant to
 -- be and not what it did.
 --
--- No legitimate writer is affected:
+-- No legitimate writer is affected. Every writer is a SECURITY DEFINER
+-- function owned by postgres, which owns both tables and so bypasses RLS
+-- without needing any client table privilege:
 --   * Every function that writes secret_access_log
 --     (20251023000004_secret_functions.sql, 20260802000000_secrets_org_ownership.sql,
 --     20260809000000_secret_read_for_user_role.sql) inserts `auth.uid()` as
---     user_id, which the new predicate permits.
+--     user_id and runs as postgres.
 --   * plugin_api_key_logs is written only by log_api_key_action(), which is
---     SECURITY DEFINER and granted to service_role alone, so it bypasses RLS
---     and needs no INSERT policy at all.
+--     SECURITY DEFINER and owned by postgres; the Edge Function calls it with
+--     the service role.
+--
+-- Closing the hole takes two strokes, because table privileges and the writer
+-- RPC are separate doors:
+--   1. Revoke the client table privileges and drop/re-scope the policies
+--      (direct PostgREST DML).
+--   2. Revoke client EXECUTE on the definer writer. PostgreSQL grants EXECUTE
+--      on functions to PUBLIC by default, and log_api_key_action() also
+--      inherits the schema-wide default-privilege grants to anon and
+--      authenticated (20251023000014_grants.sql:697-699; the function was
+--      created later, in 20260204000000). Its explicit service_role grant is
+--      additive, not a restriction. Left open, any client could forge API-key
+--      history through the RPC - the exact hole this migration closes for
+--      direct table writes.
 
 -- ---------------------------------------------------------------------------
 -- secret_access_log
@@ -45,21 +60,23 @@
 -- anon has no reason to touch a secret audit trail in any way.
 REVOKE ALL ON TABLE public.secret_access_log FROM anon;
 
--- authenticated keeps SELECT (policy "secret_access_log_select") and INSERT
--- (the logging functions run as the caller). Nothing has ever been allowed to
--- amend or erase an audit row; the grant now says so too.
-REVOKE UPDATE, DELETE ON TABLE public.secret_access_log FROM authenticated;
+-- authenticated keeps SELECT (policy "secret_access_log_select") and loses
+-- INSERT as well: every writer is a SECURITY DEFINER function owned by
+-- postgres, which bypasses RLS and needs no client table privilege. Keeping a
+-- client INSERT - even one scoped to user_id = auth.uid() - would only let a
+-- signed-in user forge "I did this" rows about themselves.
+REVOKE INSERT, UPDATE, DELETE ON TABLE public.secret_access_log FROM authenticated;
 
+-- The old unconditional INSERT policy is dropped and not recreated: with no
+-- INSERT privilege on the table, no client statement can insert a row, and a
+-- leftover policy would be misleading dead code.
 DROP POLICY IF EXISTS "secret_access_log_insert" ON public.secret_access_log;
 
-CREATE POLICY "secret_access_log_insert" ON public.secret_access_log
-    FOR INSERT TO authenticated
-    WITH CHECK (user_id = auth.uid());
-
 COMMENT ON TABLE public.secret_access_log IS
-    'Audit log for all secret access and sharing operations. Append-only: a '
-    'signed-in user may log an operation as themselves, and nothing may update '
-    'or delete a row. service_role bypasses RLS for retention work.';
+    'Audit log for all secret access and sharing operations. Append-only: '
+    'written only by SECURITY DEFINER secret functions; a signed-in user may '
+    'read their own rows, and nothing may insert, update or delete one. '
+    'service_role bypasses RLS for retention work.';
 
 -- ---------------------------------------------------------------------------
 -- plugin_api_key_logs
@@ -77,7 +94,13 @@ CREATE POLICY "Service role can insert API key logs" ON public.plugin_api_key_lo
     FOR INSERT TO service_role
     WITH CHECK (true);
 
+-- Second door: the definer writer itself. Without this, an anon client could
+-- call the RPC and forge rows for any api_key_id even with the table locked.
+REVOKE EXECUTE ON FUNCTION public.log_api_key_action(uuid, text, text, text, text, boolean, text)
+    FROM PUBLIC, anon, authenticated;
+
 COMMENT ON TABLE public.plugin_api_key_logs IS
     'Plugin store: audit log for API key usage. Written only by '
-    'log_api_key_action() (SECURITY DEFINER, service_role). Key owners may read '
-    'their own rows; nobody may amend or erase one.';
+    'log_api_key_action() (SECURITY DEFINER, service_role; client EXECUTE '
+    'revoked). Key owners may read their own rows; nobody may insert, amend '
+    'or erase one.';
