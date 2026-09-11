@@ -7,10 +7,18 @@ import kotlin.test.assertTrue
 /**
  * Update-check version ordering.
  *
- * Every case below is one the previous hand-rolled comparison got wrong. It
- * split on "." and dropped any segment that was not a bare integer, so a
- * dropped segment shifted every later one into the wrong position: "1.0.0+build.7"
- * parsed as [1, 7] and compared 7 against the MINOR of the installed version.
+ * The cases the previous hand-rolled comparison got wrong are the regression
+ * tests here: it split on "." and dropped any segment that was not a bare
+ * integer, and each dropped segment shifted every later one into the wrong
+ * position - "1.0.0+build.7" parsed as [1, 0, 7], the 7 landing in the PATCH
+ * slot, and beat the installed [1, 0, 0]. That is the build-metadata case
+ * below, plus the release-candidate downgrade, the upgrade over a pre-release
+ * install, the release-vs-pre-release ordering, the pre-release ordering among
+ * themselves, and the "v"-prefixed tag.
+ *
+ * The remaining cases ALSO pass against the old comparison. They are pinned as
+ * guards so the delegation to SemanticVersion cannot quietly regress the
+ * ordinary orderings the old code already got right.
  *
  * The two that a user would actually notice are pinned first.
  */
@@ -19,7 +27,8 @@ class PluginRepositoryVersionTest {
 
     @Test
     fun `build metadata does not make a version newer than itself`() {
-        // The loop case. "1.0.0+build.7" read as [1, 7], beating [1, 0, 0], so the
+        // The loop case. "1.0.0+build.7" read as [1, 0, 7] - the "0+build" segment
+        // was dropped, so the 7 landed in the PATCH slot - beating [1, 0, 0], so the
         // store offered an update to the version already installed, on every check,
         // forever. SemVer section 10 says build metadata is ignored for precedence.
         assertFalse(manager.isNewerVersion("1.0.0+build.7", "1.0.0"))
@@ -27,9 +36,9 @@ class PluginRepositoryVersionTest {
 
     @Test
     fun `a release candidate is never offered over its own release`() {
-        // "2.0.0-rc.1" read as [2, 0]; installed "2.0.0" read as [2, 0, 0]. Equal
-        // through both present positions, and the old code then compared 0 with 0
-        // and fell through to true on the earlier segment, offering a downgrade.
+        // "2.0.0-rc.1" read as [2, 0, 1] - "0-rc" was dropped, so the 1 landed in
+        // the PATCH slot - and the old loop returned true the moment 1 > 0 at that
+        // third position, offering the pre-release over its own release.
         assertFalse(manager.isNewerVersion("2.0.0-rc.1", "2.0.0"))
     }
 
