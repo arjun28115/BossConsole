@@ -142,7 +142,9 @@ object FileNameSanitizer {
         val budget = MAX_FILENAME_LENGTH - extension.length
         val truncated =
             if (budget <= 0) {
-                name.take(MAX_FILENAME_LENGTH)
+                // The extension alone would fill the whole limit, so there is no room
+                // to keep it: preserve the base name only, cut to the limit.
+                name.substringBeforeLast('.').take(MAX_FILENAME_LENGTH)
             } else {
                 name.substringBeforeLast('.').take(budget) + extension
             }

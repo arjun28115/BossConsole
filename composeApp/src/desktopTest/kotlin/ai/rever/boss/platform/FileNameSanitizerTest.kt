@@ -68,6 +68,13 @@ class FileNameSanitizerTest {
     }
 
     @Test
+    fun `an extension that cannot fit is abandoned rather than shortened`() {
+        // "a." plus 300 characters gives a 301-character "extension", which cannot
+        // fit in the 255 limit, so the base name survives and the extension goes.
+        assertEquals("a", FileNameSanitizer.sanitize("a." + "x".repeat(300)))
+    }
+
+    @Test
     fun `every result stays within the length limit`() {
         val inputs = listOf("x".repeat(300), "x".repeat(300) + ".pdf", "a." + "x".repeat(300))
         for (input in inputs) {
