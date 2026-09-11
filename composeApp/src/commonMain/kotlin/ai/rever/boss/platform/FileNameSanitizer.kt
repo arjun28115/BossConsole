@@ -105,20 +105,50 @@ object FileNameSanitizer {
         // 5. Remove trailing dots and spaces (invalid on Windows)
         sanitized = sanitized.trimEnd('.', ' ')
 
-        // 6. Ensure at least one character remains
+        // 6. Ensure at least one character remains.
         if (sanitized.isBlank() || sanitized == extension) {
-            sanitized = "download$extension"
+            // The extension is trimmed again on the way in. For a suggested name of
+            // "." or "..." the extension computed in step 4 is a lone ".", and
+            // appending it raw handed back "download.", re-creating exactly the
+            // trailing dot step 5 exists to remove.
+            sanitized = "download" + extension.trimEnd('.', ' ')
         }
 
-        // 7. Truncate to maximum length while preserving extension
+        // 7. Truncate to maximum length, keeping the extension when it fits.
         if (sanitized.length > MAX_FILENAME_LENGTH) {
-            val ext = if (extension.isNotEmpty()) extension else ""
-            val maxNameLength = MAX_FILENAME_LENGTH - ext.length
-            val baseName = sanitized.substringBeforeLast('.').take(maxNameLength)
-            sanitized = baseName + ext
+            sanitized = truncate(sanitized, extension)
         }
 
         return sanitized
+    }
+
+    /**
+     * Cut [name] to [MAX_FILENAME_LENGTH], keeping [extension] only if there is room.
+     *
+     * Nothing bounds how long an extension can be: it is whatever follows the last dot
+     * in a name the download source chose. A suggested name of "a." followed by 300
+     * characters produces an extension of 301, and subtracting that from the limit gave
+     * a negative budget which then reached `take()`, which rejects a negative count and
+     * throws out of the download handler.
+     *
+     * When the extension cannot fit, it is abandoned rather than shortened. A truncated
+     * extension is not the file's type, so inventing one would be worse than having
+     * none, and a name that is nothing but an extension was never worth preserving.
+     */
+    private fun truncate(
+        name: String,
+        extension: String,
+    ): String {
+        val budget = MAX_FILENAME_LENGTH - extension.length
+        val truncated =
+            if (budget <= 0) {
+                name.take(MAX_FILENAME_LENGTH)
+            } else {
+                name.substringBeforeLast('.').take(budget) + extension
+            }
+        // Cutting mid-name can expose a dot or space that step 5 had removed, so the
+        // Windows rule is re-applied to whatever the cut produced.
+        return truncated.trimEnd('.', ' ').ifBlank { "download" }
     }
 
     /**
