@@ -89,8 +89,8 @@ object FileNameSanitizer {
                     }
                 }.joinToString("")
 
-        // 4. Handle Windows reserved names
-        val nameWithoutExtension = sanitized.substringBeforeLast('.', sanitized)
+        // 4. Handle Windows reserved names. See [defuseDeviceName] for why the check is
+        // against the segment before the FIRST dot.
         val extension =
             if (sanitized.contains('.')) {
                 "." + sanitized.substringAfterLast('.')
@@ -98,9 +98,7 @@ object FileNameSanitizer {
                 ""
             }
 
-        if (nameWithoutExtension.uppercase() in WINDOWS_RESERVED_NAMES) {
-            sanitized = "${replacement}${nameWithoutExtension}$extension"
-        }
+        sanitized = defuseDeviceName(sanitized, replacement)
 
         // 5. Remove trailing dots and spaces (invalid on Windows)
         sanitized = sanitized.trimEnd('.', ' ')
@@ -149,25 +147,63 @@ object FileNameSanitizer {
         name: String,
         replacement: Char,
     ): String {
+        val cut = cutTo(name, MAX_FILENAME_LENGTH, replacement)
+        // Defusing prepends one character. Rather than let that push the result over the
+        // limit, the cut is redone one character shorter, which is always enough because
+        // the prefix is exactly one character.
+        return if (cut.length <= MAX_FILENAME_LENGTH) {
+            cut
+        } else {
+            cutTo(name, MAX_FILENAME_LENGTH - 1, replacement)
+        }
+    }
+
+    /** One pass of the cut: shorten to [limit], tidy the tail, then defuse. */
+    private fun cutTo(
+        name: String,
+        limit: Int,
+        replacement: Char,
+    ): String {
         val extension =
             if (name.contains('.')) {
                 "." + name.substringAfterLast('.')
             } else {
                 ""
             }
-        val budget = MAX_FILENAME_LENGTH - extension.length
+        val budget = limit - extension.length
         val truncated =
             if (budget <= 0) {
                 // The extension alone would fill the whole limit, so there is no room
                 // to keep it: preserve the base name only, cut to the limit.
-                name.substringBeforeLast('.').take(MAX_FILENAME_LENGTH)
+                name.substringBeforeLast('.').take(limit)
             } else {
                 name.substringBeforeLast('.').take(budget) + extension
             }
         // Cutting mid-name can expose a dot or space that step 5 had removed, so the
         // Windows rule is re-applied to whatever the cut produced.
-        val cut = truncated.trimEnd('.', ' ').ifBlank { "download" }
-        return if (cut.uppercase() in WINDOWS_RESERVED_NAMES) "$replacement$cut" else cut
+        val tidied = truncated.trimEnd('.', ' ').ifBlank { "download" }
+        return defuseDeviceName(tidied, replacement)
+    }
+
+    /**
+     * Prefix [name] when Windows would resolve it to a character device rather than a file.
+     *
+     * The comparison is against the segment before the **first** dot, not the last. Win32
+     * stops parsing a device name there, so `NUL.txt` and `CON.tar.gz` are both the device,
+     * which Microsoft's own naming rules state in as many words. Comparing the segment
+     * before the *last* dot missed every multi-dot case, and let truncation manufacture a
+     * device out of a name that was not one: cutting `CONSOLE.` followed by 251 characters
+     * to fit the limit leaves `CON.` and the rest, which is the console.
+     *
+     * Trailing spaces are trimmed before the comparison for the same reason: Windows
+     * ignores them, so `CON .txt` is the device too.
+     */
+    private fun defuseDeviceName(
+        name: String,
+        replacement: Char,
+    ): String {
+        val device = name.substringBefore('.').trimEnd(' ')
+        return if (device.uppercase() in WINDOWS_RESERVED_NAMES) "$replacement$name" else name
     }
 
     /**

@@ -104,12 +104,11 @@ class FileNameSanitizerTest {
     }
 
     @Test
-    fun `windows device names are defused in any case, and with a single extension`() {
-        // The check runs on the segment before the last dot, so this pins the bare names in
-        // three cases, the trailing-space padding the top-level trim removes before the check,
-        // and one single-extension name. Multi-dot names like "CON.tar.gz" are untouched by
-        // the sanitizer (pre-existing, out of scope here), so the title says what the check
-        // actually covers instead of promising every extension shape.
+    fun `windows device names are defused whatever their case or padding`() {
+        // The check now runs on the segment before the FIRST dot, so this pins the bare
+        // names in three cases and the trailing-space padding the top-level trim removes
+        // before the check. Extension shapes are covered by the two tests below, which
+        // exist because the last-dot version missed every multi-dot name.
         for (name in listOf("CON", "con", "Con", "PRN", "NUL", "COM1", "LPT9")) {
             assertEquals("_$name", FileNameSanitizer.sanitize(name), "sanitize($name)")
         }
@@ -133,6 +132,59 @@ class FileNameSanitizerTest {
         // fire. The oversized extension then leaves only the base, and the trailing trim
         // removes the padding - leaving bare "CON", a name Windows refuses.
         assertEquals("_CON", FileNameSanitizer.sanitize("CON ." + "x".repeat(255)))
+    }
+
+    @Test
+    fun `a device name with any number of extensions is still defused`() {
+        // Win32 stops the device comparison at the FIRST dot, so NUL.txt and CON.tar.gz
+        // are both the device. Comparing the segment before the LAST dot saw "CON.tar",
+        // which is not reserved, and let the name through untouched.
+        assertEquals("_CON.tar.gz", FileNameSanitizer.sanitize("CON.tar.gz"))
+        assertEquals("_NUL.tar.gz", FileNameSanitizer.sanitize("NUL.tar.gz"))
+        assertEquals("_CON.txt", FileNameSanitizer.sanitize("CON.txt"))
+        assertEquals("CONSOLE.txt", FileNameSanitizer.sanitize("CONSOLE.txt"))
+    }
+
+    @Test
+    fun `truncation cannot manufacture a device name out of one that was not`() {
+        // "CONSOLE." followed by 251 characters is not a device: step 4 sees CONSOLE.
+        // Cutting it to fit the limit left "CON." and the rest, which Windows resolves
+        // to the console, so the download would write nowhere and no file would appear.
+        val result = FileNameSanitizer.sanitize("CONSOLE." + "x".repeat(251))
+
+        assertFalse(
+            result.substringBefore('.').trimEnd(' ').uppercase() == "CON",
+            "truncation produced the console device: '$result'",
+        )
+        assertTrue(result.length <= 255, "result was ${result.length} characters")
+    }
+
+    @Test
+    fun `no input produces a name Windows would resolve to a device`() {
+        val reserved =
+            setOf("CON", "PRN", "AUX", "NUL") +
+                (1..9).map { "COM$it" } + (1..9).map { "LPT$it" }
+        val inputs =
+            listOf(
+                "CON",
+                "con",
+                "CON ",
+                "CON.txt",
+                "CON.tar.gz",
+                "NUL.tar.gz",
+                "CONSOLE." + "x".repeat(251),
+                "CON ." + "x".repeat(255),
+                "COM1.a.b",
+                "lpt9.tar.gz",
+                "aux.x.y.z",
+            )
+        for (input in inputs) {
+            val result = FileNameSanitizer.sanitize(input)
+            assertFalse(
+                result.substringBefore('.').trimEnd(' ').uppercase() in reserved,
+                "sanitize($input) returned '$result', which Windows resolves to a device",
+            )
+        }
     }
 
     @Test
