@@ -128,10 +128,20 @@ class FileNameSanitizerTest {
 
     @Test
     fun `truncation cannot shrink a padded name onto a bare device name`() {
-        // "CON " (the space before the dot) is not a reserved segment, so step 4 does not
-        // fire. The oversized extension then leaves only the base, and the trailing trim
-        // removes the padding - leaving bare "CON", a name Windows refuses.
+        // Step 4's own trailing-space trim now defuses this input before truncation
+        // runs, so the cut-level defuse it was written for is exercised by the
+        // tight-limit test below instead. The assertion still pins the end-to-end shape.
         assertEquals("_CON", FileNameSanitizer.sanitize("CON ." + "x".repeat(255)))
+    }
+
+    @Test
+    fun `a redo that itself defuses lands exactly at the limit`() {
+        // The only path where a defused cut survives into the returned value, and the
+        // one where the 255 bound is exactly tight: the budget lands inside the run of
+        // spaces, so both the 255 cut and the 254 redo trim onto "CON" and both defuse.
+        val result = FileNameSanitizer.sanitize("CON  X." + "x".repeat(249))
+        assertEquals("_CON ." + "x".repeat(249), result)
+        assertEquals(255, result.length)
     }
 
     @Test
@@ -148,15 +158,11 @@ class FileNameSanitizerTest {
     @Test
     fun `truncation cannot manufacture a device name out of one that was not`() {
         // "CONSOLE." followed by 251 characters is not a device: step 4 sees CONSOLE.
-        // Cutting it to fit the limit left "CON." and the rest, which Windows resolves
-        // to the console, so the download would write nowhere and no file would appear.
+        // The first cut to the limit leaves "CON." and the rest - the console - so the
+        // redo runs one character shorter and shortens the base to "CO." rather than
+        // defusing it; the pinned shape rules out the defused form as well.
         val result = FileNameSanitizer.sanitize("CONSOLE." + "x".repeat(251))
-
-        assertFalse(
-            result.substringBefore('.').trimEnd(' ').uppercase() == "CON",
-            "truncation produced the console device: '$result'",
-        )
-        assertTrue(result.length <= 255, "result was ${result.length} characters")
+        assertEquals("CO." + "x".repeat(251), result)
     }
 
     @Test

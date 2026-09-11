@@ -90,7 +90,8 @@ object FileNameSanitizer {
                 }.joinToString("")
 
         // 4. Handle Windows reserved names. See [defuseDeviceName] for why the check is
-        // against the segment before the FIRST dot.
+        // against the segment before the FIRST dot. The extension is computed from the
+        // LAST dot - "what kind of file is this" - and feeds only the fallback in step 6.
         val extension =
             if (sanitized.contains('.')) {
                 "." + sanitized.substringAfterLast('.')
@@ -149,8 +150,10 @@ object FileNameSanitizer {
     ): String {
         val cut = cutTo(name, MAX_FILENAME_LENGTH, replacement)
         // Defusing prepends one character. Rather than let that push the result over the
-        // limit, the cut is redone one character shorter, which is always enough because
-        // the prefix is exactly one character.
+        // limit, the cut is redone one character shorter. One redo is always enough:
+        // every branch of cutTo returns at most limit + 1 (the defuse is the only thing
+        // that can add a character), so the redo at limit - 1 lands at or under the
+        // limit even when it defuses in turn.
         return if (cut.length <= MAX_FILENAME_LENGTH) {
             cut
         } else {
