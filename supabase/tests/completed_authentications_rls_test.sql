@@ -15,7 +15,7 @@
 -- BossConsole#530 by @Rushikeshiitb.
 
 begin;
-select plan(15);
+select plan(18);
 
 -- 1-4: no policy remains for either client role, service_role keeps its own,
 -- and RLS is still enabled.
@@ -99,6 +99,22 @@ select ok(
 select ok(
     has_table_privilege('service_role', 'public.completed_authentications', 'DELETE'),
     'service_role can still DELETE from the token table'
+);
+
+-- 16-18: the expired-row cleanup RPC keeps no client handle either. It returns
+-- void, so this is not a data leak, but after the table revoke it could do
+-- nothing as a client anyway; the grants are dead weight on a token table.
+select ok(
+    not has_function_privilege('anon', 'public.cleanup_expired_completed_authentications()', 'EXECUTE'),
+    'anon cannot execute the expired-row cleanup RPC'
+);
+select ok(
+    not has_function_privilege('authenticated', 'public.cleanup_expired_completed_authentications()', 'EXECUTE'),
+    'authenticated cannot execute the expired-row cleanup RPC'
+);
+select ok(
+    has_function_privilege('service_role', 'public.cleanup_expired_completed_authentications()', 'EXECUTE'),
+    'service_role can still execute the cleanup RPC'
 );
 
 select * from finish();

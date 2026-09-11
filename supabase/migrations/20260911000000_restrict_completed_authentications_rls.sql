@@ -65,7 +65,16 @@ DROP POLICY IF EXISTS "Authenticated users can delete own results" ON public.com
 -- (20251023000014_grants.sql:547) are deliberately untouched: that is the path
 -- the Edge Function uses and the only one that has to keep working.
 
+-- The cleanup RPC is granted to both client roles
+-- (20251023000014_grants.sql:240-241), but no client code calls it: it returns
+-- void, only deletes rows past expires_at_timestamp, and after the revoke above
+-- it cannot even execute its DELETE as a client (no table privilege). Revoke the
+-- client EXECUTE so no client role keeps any handle to this table's data; the
+-- service_role grant is left for the server-side path.
+REVOKE EXECUTE ON FUNCTION public.cleanup_expired_completed_authentications() FROM anon, authenticated;
+
 COMMENT ON TABLE public.completed_authentications IS
     'Cross-device login handoff: holds freshly minted access/refresh tokens until the desktop claims them. '
     'Service-role only. anon and authenticated hold no policy and no table privilege (BossConsole#528); '
-    'clients reach this data through the passkey Edge Function, never through PostgREST.';
+    'clients reach this data through the passkey Edge Function, never through PostgREST. '
+    'The expired-row cleanup RPC is likewise service-role only.';
