@@ -8,6 +8,7 @@ import ai.rever.boss.keymap.model.KeymapActions
 import ai.rever.boss.keymap.model.ShortcutContext
 import ai.rever.boss.keymap.model.TabSwitchMode
 import ai.rever.boss.keymap.model.canonicalModifiers
+import ai.rever.boss.keymap.model.primaryModifierPressed
 import ai.rever.boss.utils.SystemUtils
 import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
@@ -327,7 +328,12 @@ object AWTKeyboardInterceptor {
         return if (SystemUtils.isMacOS) {
             if (hasCmd) KeyEvent.VK_META else KeyEvent.VK_CONTROL
         } else {
-            if (hasCmd) KeyEvent.VK_CONTROL else KeyEvent.VK_META
+            // Collapsed with the matcher deliberately. This picks the PHYSICAL key the user is
+            // holding, so it has to name the same one chordMatchesEvent accepted. Returning
+            // VK_META for an explicit "Ctrl" chord armed a key that is not down, and the KDoc
+            // above records what that costs: the switcher overlay wedges open rather than the
+            // chord merely being lost.
+            KeyEvent.VK_CONTROL
         }
     }
 
@@ -507,15 +513,13 @@ object AWTKeyboardInterceptor {
         val hasAlt = "alt" in canonical
 
         val primaryMatch =
-            if (hasCmd || hasCtrl) {
-                if (SystemUtils.isMacOS) {
-                    (hasCmd && event.isMetaDown) || (hasCtrl && event.isControlDown)
-                } else {
-                    (hasCmd && event.isControlDown) || (hasCtrl && event.isMetaDown)
-                }
-            } else {
-                !event.isMetaDown && !event.isControlDown
-            }
+            primaryModifierPressed(
+                hasCmd = hasCmd,
+                hasCtrl = hasCtrl,
+                metaDown = event.isMetaDown,
+                controlDown = event.isControlDown,
+                isMacOS = SystemUtils.isMacOS,
+            )
         return primaryMatch && hasShift == event.isShiftDown && hasAlt == event.isAltDown
     }
 
