@@ -98,7 +98,6 @@ object FileIcons {
         // Handle by extension
         return when (extension) {
             // Windows batch - PowerShell icon, deliberately not the language mapping
-
             "bat", "cmd" -> {
                 FileIconInfo(LanguageIcons.powershell, LanguageIcons.Colors.powershell)
             }
@@ -108,13 +107,9 @@ object FileIcons {
                 FileIconInfo(config, Colors.xml)
             }
 
+            // Apple property list
             "plist" -> {
                 FileIconInfo(LanguageIcons.ios, LanguageIcons.Colors.ios)
-            }
-
-            // Apple property list
-            "gradle" -> {
-                FileIconInfo(LanguageIcons.gradle, LanguageIcons.Colors.gradle)
             }
 
             "properties", "ini", "cfg", "conf" -> {

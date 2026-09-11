@@ -16,7 +16,8 @@ import kotlin.test.assertNotEquals
  *
  * The two properties worth holding onto are that no extension LOST an icon (the
  * old list was a strict subset) and that the explicit branches still win, because
- * several of them deliberately disagree with the language mapping.
+ * one of them (xml) deliberately disagrees with the language mapping and the rest
+ * carry icons the language table does not have.
  */
 class FileIconsLanguageDelegationTest {
     private val genericFile = FileIcons.forFile("a.does-not-exist-anywhere")
@@ -64,12 +65,12 @@ class FileIconsLanguageDelegationTest {
 
     @Test
     fun `explicit branches still override the language mapping`() {
-        // The reason the remaining `when` has to stay ahead of the delegation.
-        // Each of these is an extension LanguageIcons also knows, where FileIcons
-        // deliberately answers something else.
+        // The reason the remaining `when` has to stay ahead of the delegation. xml is the one
+        // branch that deliberately disagrees with the language mapping (a .xml is a config
+        // document, not a Maven project); bat/cmd and plist carry icons the language table does
+        // not have, and they would fall to the generic file icon if their branches were dropped.
         assertEquals(LanguageIcons.powershell, FileIcons.forFile("run.bat").icon)
         assertEquals(LanguageIcons.powershell, FileIcons.forFile("run.cmd").icon)
-        assertEquals(LanguageIcons.gradle, FileIcons.forFile("build.gradle").icon)
         assertEquals(LanguageIcons.ios, FileIcons.forFile("Info.plist").icon)
 
         // xml, properties, ini and cfg are config documents here, not markup/source.
@@ -78,6 +79,19 @@ class FileIconsLanguageDelegationTest {
         val xml = FileIcons.forFile("data.xml")
         assertEquals(xml.icon, FileIcons.forFile("app.properties").icon)
         assertEquals(xml.icon, FileIcons.forFile("settings.ini").icon)
+        // And the disagreement is real: the same contents under a .pom extension get the
+        // Maven icon through the language table, so the xml branch is load-bearing.
+        assertNotEquals(xml.icon, FileIcons.forFile("data.pom").icon)
+    }
+
+    @Test
+    fun `gradle files keep their icon through the language table`() {
+        // The old gate's explicit "gradle" branch was value-identical to LanguageIcons' own
+        // mapping, so it was the duplication this PR removes rather than an override.
+        // build.gradle is still claimed by forSpecialFileName by name; libs.gradle reaches the
+        // icon through the forExtensionOrNull delegation, which is what pins the hand-off.
+        assertEquals(LanguageIcons.gradle, FileIcons.forFile("build.gradle").icon)
+        assertEquals(LanguageIcons.gradle, FileIcons.forFile("libs.gradle").icon)
     }
 
     @Test

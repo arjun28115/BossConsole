@@ -550,12 +550,6 @@ object LanguageIcons {
     // ═══════════════════════════════════════════════════════════════════════════
 
     /**
-     * Get icon and color for a file extension.
-     * @param extension File extension without the dot (e.g., "kt", "py", "js")
-     * @return Pair of ImageVector icon and Color
-     */
-
-    /**
      * Icon and colour for a file extension, or the generic unknown pair.
      *
      * Kept for callers that want a total function. Anything that needs to know
