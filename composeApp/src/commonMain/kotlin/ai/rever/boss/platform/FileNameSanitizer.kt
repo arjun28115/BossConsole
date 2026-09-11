@@ -116,14 +116,14 @@ object FileNameSanitizer {
 
         // 7. Truncate to maximum length, keeping the extension when it fits.
         if (sanitized.length > MAX_FILENAME_LENGTH) {
-            sanitized = truncate(sanitized, extension)
+            sanitized = truncate(sanitized, replacement)
         }
 
         return sanitized
     }
 
     /**
-     * Cut [name] to [MAX_FILENAME_LENGTH], keeping [extension] only if there is room.
+     * Cut [name] to [MAX_FILENAME_LENGTH], keeping the extension only if there is room.
      *
      * Nothing bounds how long an extension can be: it is whatever follows the last dot
      * in a name the download source chose. A suggested name of "a." followed by 300
@@ -131,14 +131,30 @@ object FileNameSanitizer {
      * a negative budget which then reached `take()`, which rejects a negative count and
      * throws out of the download handler.
      *
+     * The extension is recomputed from [name] rather than taken from the caller. The
+     * caller's copy was computed before the trailing-dot trim, and for exactly the names
+     * this class exists for - ones ending in a dot - it is a stale lone "." that makes a
+     * real extension (".pdf") look as if it did not fit.
+     *
      * When the extension cannot fit, it is abandoned rather than shortened. A truncated
      * extension is not the file's type, so inventing one would be worse than having
      * none, and a name that is nothing but an extension was never worth preserving.
+     *
+     * The cut can also undo a step 4 decision: trimming can shrink the base onto a
+     * reserved device name step 4 missed, because a space before the dot ("CON .") keeps
+     * the checked segment out of the reserved set. Whatever the cut leaves is therefore
+     * defused with [replacement], the way step 4 defuses.
      */
     private fun truncate(
         name: String,
-        extension: String,
+        replacement: Char,
     ): String {
+        val extension =
+            if (name.contains('.')) {
+                "." + name.substringAfterLast('.')
+            } else {
+                ""
+            }
         val budget = MAX_FILENAME_LENGTH - extension.length
         val truncated =
             if (budget <= 0) {
@@ -150,7 +166,8 @@ object FileNameSanitizer {
             }
         // Cutting mid-name can expose a dot or space that step 5 had removed, so the
         // Windows rule is re-applied to whatever the cut produced.
-        return truncated.trimEnd('.', ' ').ifBlank { "download" }
+        val cut = truncated.trimEnd('.', ' ').ifBlank { "download" }
+        return if (cut.uppercase() in WINDOWS_RESERVED_NAMES) "$replacement$cut" else cut
     }
 
     /**

@@ -104,14 +104,35 @@ class FileNameSanitizerTest {
     }
 
     @Test
-    fun `windows device names are defused, whatever their case or extension`() {
+    fun `windows device names are defused in any case, and with a single extension`() {
+        // The check runs on the segment before the last dot, so this pins the bare names in
+        // three cases, the trailing-space padding the top-level trim removes before the check,
+        // and one single-extension name. Multi-dot names like "CON.tar.gz" are untouched by
+        // the sanitizer (pre-existing, out of scope here), so the title says what the check
+        // actually covers instead of promising every extension shape.
         for (name in listOf("CON", "con", "Con", "PRN", "NUL", "COM1", "LPT9")) {
-            assertFalse(
-                FileNameSanitizer.sanitize(name).uppercase() == name.uppercase(),
-                "sanitize($name) left the device name intact",
-            )
+            assertEquals("_$name", FileNameSanitizer.sanitize(name), "sanitize($name)")
         }
+        assertEquals("_CON", FileNameSanitizer.sanitize("CON "))
         assertEquals("_CON.txt", FileNameSanitizer.sanitize("CON.txt"))
+    }
+
+    @Test
+    fun `a trailing dot does not hide a real extension from the truncation`() {
+        // Before the trailing-dot trim, the extension of "a<252 x>.pdf..." is the lone dot
+        // after the last one. Carrying that stale copy into the cut dropped the real ".pdf"
+        // even though it fit, leaving a 253-character extensionless name.
+        val result = FileNameSanitizer.sanitize("a" + "x".repeat(252) + ".pdf...")
+        assertEquals("a" + "x".repeat(250) + ".pdf", result)
+        assertEquals(255, result.length)
+    }
+
+    @Test
+    fun `truncation cannot shrink a padded name onto a bare device name`() {
+        // "CON " (the space before the dot) is not a reserved segment, so step 4 does not
+        // fire. The oversized extension then leaves only the base, and the trailing trim
+        // removes the padding - leaving bare "CON", a name Windows refuses.
+        assertEquals("_CON", FileNameSanitizer.sanitize("CON ." + "x".repeat(255)))
     }
 
     @Test
