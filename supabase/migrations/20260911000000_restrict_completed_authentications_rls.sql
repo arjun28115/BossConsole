@@ -70,8 +70,11 @@ DROP POLICY IF EXISTS "Authenticated users can delete own results" ON public.com
 -- void, only deletes rows past expires_at_timestamp, and after the revoke above
 -- it cannot even execute its DELETE as a client (no table privilege). Revoke the
 -- client EXECUTE so no client role keeps any handle to this table's data; the
--- service_role grant is left for the server-side path.
-REVOKE EXECUTE ON FUNCTION public.cleanup_expired_completed_authentications() FROM anon, authenticated;
+-- service_role grant is left for the server-side path. PUBLIC is included
+-- because PostgreSQL grants EXECUTE on functions to PUBLIC by default, so
+-- revoking the two named roles alone would leave the door open (verified:
+-- has_function_privilege still returned true for both client roles).
+REVOKE EXECUTE ON FUNCTION public.cleanup_expired_completed_authentications() FROM PUBLIC, anon, authenticated;
 
 COMMENT ON TABLE public.completed_authentications IS
     'Cross-device login handoff: holds freshly minted access/refresh tokens until the desktop claims them. '
