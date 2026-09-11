@@ -1,6 +1,9 @@
 package ai.rever.boss.plugin.repository
 
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -11,10 +14,9 @@ import kotlin.test.assertTrue
  * tests here: it split on "." and dropped any segment that was not a bare
  * integer, and each dropped segment shifted every later one into the wrong
  * position - "1.0.0+build.7" parsed as [1, 0, 7], the 7 landing in the PATCH
- * slot, and beat the installed [1, 0, 0]. That is the build-metadata case
- * below, plus the release-candidate downgrade, the upgrade over a pre-release
- * install, the release-vs-pre-release ordering, the pre-release ordering among
- * themselves, and the "v"-prefixed tag.
+ * slot, and beat the installed [1, 0, 0]. Those are the build-metadata case
+ * below, the release-candidate downgrade, the upgrade over a pre-release
+ * install, the pre-release ordering among themselves, and the "v"-prefixed tag.
  *
  * The remaining cases ALSO pass against the old comparison. They are pinned as
  * guards so the delegation to SemanticVersion cannot quietly regress the
@@ -100,5 +102,77 @@ class PluginRepositoryVersionTest {
         // in a broken state; withholding every future update would strand it there.
         assertTrue(manager.isNewerVersion("1.2.3", ""))
         assertTrue(manager.isNewerVersion("1.2.3", "unknown"))
+    }
+
+    // The two cases below drive checkForUpdates end to end. It has no production
+    // caller today, and without them the offerUpdateIfNewer helper and its debug
+    // log would have no coverage at all; everything else in this file pins
+    // isNewerVersion directly.
+
+    @Test
+    fun `a newer store version is offered through checkForUpdates`() =
+        runTest {
+            val manager = PluginRepositoryManager()
+            manager.addRepository(UpdateCheckRepository(Result.success(plugin("1.0.1"))))
+
+            val result = manager.checkForUpdates(mapOf("com.example.plugin" to "1.0.0"))
+
+            assertTrue(result.isSuccess)
+            val offered = result.getOrThrow()
+            assertEquals(1, offered.size)
+            assertEquals("1.0.1", offered.single().plugin.version)
+        }
+
+    @Test
+    fun `an unparseable store version is never offered through checkForUpdates`() =
+        runTest {
+            val manager = PluginRepositoryManager()
+            manager.addRepository(UpdateCheckRepository(Result.success(plugin("1.0.1.RELEASE"))))
+
+            val updates = manager.checkForUpdates(mapOf("com.example.plugin" to "1.0.0"))
+
+            assertTrue(updates.isSuccess)
+            assertTrue(
+                updates.getOrThrow().isEmpty(),
+                "nothing can be said about a version we cannot parse",
+            )
+        }
+
+    private fun plugin(version: String) =
+        PluginInfo(
+            pluginId = "com.example.plugin",
+            displayName = "Example",
+            version = version,
+            description = "Test plugin",
+        )
+
+    /** Answers every lookup with one canned [Result]; only getPlugin is exercised. */
+    private class UpdateCheckRepository(
+        private val answer: Result<PluginInfo?>,
+    ) : PluginRepository {
+        override val id: String = "store"
+        override val name: String = id
+        override val isLocal: Boolean = false
+        override val isAvailable: Boolean = true
+
+        override suspend fun getPlugin(pluginId: String): Result<PluginInfo?> = answer
+
+        override suspend fun listPlugins(): Result<List<PluginInfo>> = Result.success(emptyList())
+
+        override suspend fun searchPlugins(filter: PluginSearchFilter): Result<PluginSearchResult> =
+            Result.failure(UnsupportedOperationException())
+
+        override suspend fun getPluginVersions(pluginId: String): Result<List<PluginInfo>> = Result.success(emptyList())
+
+        override suspend fun downloadPlugin(
+            pluginId: String,
+            version: String?,
+            targetPath: String,
+            onProgress: ((Float) -> Unit)?,
+        ): Result<String> = Result.failure(UnsupportedOperationException())
+
+        override fun getDownloadProgress(pluginId: String): Flow<Float>? = null
+
+        override suspend fun refresh(): Result<Unit> = Result.success(Unit)
     }
 }

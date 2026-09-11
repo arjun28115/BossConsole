@@ -336,9 +336,10 @@ class PluginRepositoryManager {
      *
      * No production caller today: the Toolbox's update path goes
      * PluginUpdateBridge -> PluginUpdateManager.checkForUpdates, which uses this
-     * manager only for lookups and downloads. It stays, pinned by tests, so the
-     * repository layer answers the same question the updater does if the paths
-     * are ever merged.
+     * manager only for lookups and downloads. It is kept because the repository
+     * layer should answer the same question the updater does if the paths are
+     * ever merged, and PluginRepositoryVersionTest drives it end to end so the
+     * offer/refusal branches cannot rot untested.
      *
      * @param installedPlugins Map of plugin ID to installed version
      * @return List of plugins with available updates
