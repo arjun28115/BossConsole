@@ -31,7 +31,7 @@
 --   is what actually stops a client from calling the definer writer.
 
 begin;
-select plan(20);
+select plan(39);
 
 -- ---------------------------------------------------------------------------
 -- Row level security is still on. Everything below is meaningless without it.
@@ -172,6 +172,125 @@ select isnt_empty(
           and policyname = 'Users can view own API key logs' $$,
     'the API key log SELECT policy still exists'
 );
+
+-- ---------------------------------------------------------------------------
+-- The second definer RPC. Same shape as log_api_key_action, same door.
+-- ---------------------------------------------------------------------------
+
+select ok(
+    not has_function_privilege('anon', 'public.update_api_key_last_used(uuid)', 'EXECUTE'),
+    'anon cannot stamp last_used_at on an arbitrary key'
+);
+
+select ok(
+    not has_function_privilege('authenticated', 'public.update_api_key_last_used(uuid)', 'EXECUTE'),
+    'authenticated cannot stamp last_used_at on an arbitrary key'
+);
+
+select ok(
+    has_function_privilege('service_role', 'public.update_api_key_last_used(uuid)', 'EXECUTE'),
+    'the Edge Function can still stamp last_used_at'
+);
+
+-- ---------------------------------------------------------------------------
+-- TRUNCATE, which no policy could ever have stopped.
+-- ---------------------------------------------------------------------------
+
+select ok(not has_table_privilege('anon', 'public.secret_access_log', 'TRUNCATE'),
+          'anon cannot truncate the secret audit log');
+select ok(not has_table_privilege('authenticated', 'public.secret_access_log', 'TRUNCATE'),
+          'authenticated cannot truncate the secret audit log');
+select ok(not has_table_privilege('anon', 'public.plugin_api_key_logs', 'TRUNCATE'),
+          'anon cannot truncate the API key log');
+select ok(not has_table_privilege('authenticated', 'public.plugin_api_key_logs', 'TRUNCATE'),
+          'authenticated cannot truncate the API key log');
+
+-- ---------------------------------------------------------------------------
+-- plugin_api_key_logs, to the same per-verb standard as its sibling. Without
+-- these, a re-grant of any verb but INSERT fails nothing here.
+-- ---------------------------------------------------------------------------
+
+select ok(not has_table_privilege('anon', 'public.plugin_api_key_logs', 'SELECT'),
+          'anon cannot read API key usage history');
+select ok(not has_table_privilege('anon', 'public.plugin_api_key_logs', 'UPDATE'),
+          'anon cannot amend API key usage history');
+select ok(not has_table_privilege('anon', 'public.plugin_api_key_logs', 'DELETE'),
+          'anon cannot erase API key usage history');
+select ok(not has_table_privilege('authenticated', 'public.plugin_api_key_logs', 'UPDATE'),
+          'authenticated cannot amend API key usage history');
+select ok(not has_table_privilege('authenticated', 'public.plugin_api_key_logs', 'DELETE'),
+          'authenticated cannot erase API key usage history');
+
+-- A policy recreated as FOR ALL under the same name and role would pass every
+-- other assertion here while granting far more than an INSERT policy.
+select is(
+    (select cmd from pg_policies
+      where schemaname = 'public' and tablename = 'plugin_api_key_logs'
+        and policyname = 'Service role can insert API key logs'),
+    'INSERT',
+    'the API key log policy still covers INSERT alone, not ALL'
+);
+
+-- ---------------------------------------------------------------------------
+-- Behaviour rather than catalogue: set the role and assert the refusal. Each of
+-- these is one of the three defects in the migration header, tested directly
+-- instead of inferred from a privilege bit.
+-- ---------------------------------------------------------------------------
+
+reset role;
+set local role anon;
+
+select throws_ok(
+    $sql$insert into public.secret_access_log (secret_id, user_id, operation)
+         values ('a0d17000-0000-4000-8000-000000000001',
+                 'a0d17000-0000-4000-8000-000000000002', 'view')$sql$,
+    '42501',
+    'permission denied for table secret_access_log',
+    'anon cannot attribute a secret access to somebody else'
+);
+
+select throws_ok(
+    $sql$select * from public.secret_access_log$sql$,
+    '42501',
+    'permission denied for table secret_access_log',
+    'anon cannot read the secret audit trail'
+);
+
+select throws_ok(
+    $sql$select public.log_api_key_action('a0d17000-0000-4000-8000-000000000003', 'publish')$sql$,
+    '42501',
+    'permission denied for function log_api_key_action',
+    'anon cannot forge API key history through the RPC, the door RLS never saw'
+);
+
+select throws_ok(
+    $sql$select public.update_api_key_last_used('a0d17000-0000-4000-8000-000000000003')$sql$,
+    '42501',
+    'permission denied for function update_api_key_last_used',
+    'anon cannot stamp last_used_at through the RPC'
+);
+
+reset role;
+set local role authenticated;
+
+select throws_ok(
+    $sql$insert into public.secret_access_log (secret_id, user_id, operation)
+         values ('a0d17000-0000-4000-8000-000000000001',
+                 'a0d17000-0000-4000-8000-000000000002', 'view')$sql$,
+    '42501',
+    'permission denied for table secret_access_log',
+    'a signed-in user cannot append an audit row, for themselves or anyone else'
+);
+
+select throws_ok(
+    $sql$select public.log_api_key_action('a0d17000-0000-4000-8000-000000000003', 'publish')$sql$,
+    '42501',
+    'permission denied for function log_api_key_action',
+    'a signed-in user cannot forge API key history either'
+);
+
+reset role;
+
 
 select * from finish();
 rollback;

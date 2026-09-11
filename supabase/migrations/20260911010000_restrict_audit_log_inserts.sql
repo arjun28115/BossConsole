@@ -104,3 +104,21 @@ COMMENT ON TABLE public.plugin_api_key_logs IS
     'log_api_key_action() (SECURITY DEFINER, service_role; client EXECUTE '
     'revoked). Key owners may read their own rows; nobody may insert, amend '
     'or erase one.';
+
+-- ---------------------------------------------------------------------------
+-- Two doors the review named that the strokes above do not reach
+-- ---------------------------------------------------------------------------
+
+-- update_api_key_last_used() has the same shape as log_api_key_action(): same
+-- file, SECURITY DEFINER, EXECUTE never revoked. Left open, a client can stamp
+-- last_used_at on any key id, which corrupts the same audit story from the
+-- other end and makes a dormant key look live.
+REVOKE EXECUTE ON FUNCTION public.update_api_key_last_used(uuid)
+    FROM PUBLIC, anon, authenticated;
+
+-- Revoking named verbs leaves the rest of the original GRANT ALL in place:
+-- TRUNCATE, REFERENCES and TRIGGER. TRUNCATE matters most, because it is not
+-- subject to row level security at all, so no policy can be its backstop. anon
+-- already lost these to the REVOKE ALL above; authenticated did not.
+REVOKE TRUNCATE, REFERENCES, TRIGGER ON TABLE public.secret_access_log FROM authenticated;
+REVOKE TRUNCATE, REFERENCES, TRIGGER ON TABLE public.plugin_api_key_logs FROM authenticated;
