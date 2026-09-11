@@ -323,19 +323,33 @@ object AWTKeyboardInterceptor {
      * with the other primary modifier arms the modifier the user is actually holding. Arming
      * the wrong one wedges the switcher overlay open rather than merely losing a chord.
      */
-    internal fun cyclingModifierKeyCode(keystroke: KeyStroke): Int {
-        val hasCmd = "cmd" in canonicalModifiers(keystroke.modifiers)
-        return if (SystemUtils.isMacOS) {
+    internal fun cyclingModifierKeyCode(keystroke: KeyStroke): Int =
+        cyclingModifierKeyCodeFor(
+            hasCmd = "cmd" in canonicalModifiers(keystroke.modifiers),
+            isMacOS = SystemUtils.isMacOS,
+        )
+
+    /**
+     * The physical key that sustains the cycle, with [isMacOS] as a parameter so both branches are
+     * reachable from a test. The inline read this replaced is why the off-macOS answer went
+     * unexercised on the machines this is developed on.
+     *
+     * Must agree with [primaryModifierPressed] on which key it just accepted. On macOS the two
+     * spellings are different keys, so the answer follows the spelling. Off macOS both are Control,
+     * so both spellings arm Control: that is not a loss of precision, it is the only key that can
+     * be down, since a Super press no longer matches any chord there. Returning VK_META for an
+     * explicit "Ctrl" chord armed a key that is not held, and the KDoc above records what that
+     * costs.
+     */
+    internal fun cyclingModifierKeyCodeFor(
+        hasCmd: Boolean,
+        isMacOS: Boolean,
+    ): Int =
+        if (isMacOS) {
             if (hasCmd) KeyEvent.VK_META else KeyEvent.VK_CONTROL
         } else {
-            // Collapsed with the matcher deliberately. This picks the PHYSICAL key the user is
-            // holding, so it has to name the same one chordMatchesEvent accepted. Returning
-            // VK_META for an explicit "Ctrl" chord armed a key that is not down, and the KDoc
-            // above records what that costs: the switcher overlay wedges open rather than the
-            // chord merely being lost.
             KeyEvent.VK_CONTROL
         }
-    }
 
     /**
      * Check if a key code represents a modifier-only key.
