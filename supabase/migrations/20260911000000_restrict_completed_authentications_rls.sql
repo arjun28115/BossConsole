@@ -67,13 +67,17 @@ DROP POLICY IF EXISTS "Authenticated users can delete own results" ON public.com
 
 -- The cleanup RPC is granted to both client roles
 -- (20251023000014_grants.sql:240-241), but no client code calls it: it returns
--- void, only deletes rows past expires_at_timestamp, and after the revoke above
--- it cannot even execute its DELETE as a client (no table privilege). Revoke the
--- client EXECUTE so no client role keeps any handle to this table's data; the
--- service_role grant is left for the server-side path. PUBLIC is included
--- because PostgreSQL grants EXECUTE on functions to PUBLIC by default, so
--- revoking the two named roles alone would leave the door open (verified:
--- has_function_privilege still returned true for both client roles).
+-- void and only deletes rows past expires_at_timestamp. The REVOKE EXECUTE below
+-- is the gate: no client role keeps any handle to this table's data; the
+-- service_role grant is left for the server-side path. (A second, weaker
+-- argument - with the table privileges revoked above, the DELETE would also
+-- fail if a client ran the function - only holds while the function is SECURITY
+-- INVOKER. Its own header comment at 20251023000003_passkey_functions.sql:221
+-- claims SECURITY DEFINER, so if someone ever "fixes" the function to match that
+-- comment, only this revoke still holds.) PUBLIC is included because PostgreSQL
+-- grants EXECUTE on functions to PUBLIC by default, so revoking the two named
+-- roles alone would leave the door open (verified: has_function_privilege still
+-- returned true for both client roles).
 REVOKE EXECUTE ON FUNCTION public.cleanup_expired_completed_authentications() FROM PUBLIC, anon, authenticated;
 
 COMMENT ON TABLE public.completed_authentications IS

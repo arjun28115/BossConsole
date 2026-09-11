@@ -10,27 +10,22 @@
 -- These assertions are about the absence of access, which is exactly the kind of
 -- thing that is easy to reintroduce: a later migration adding a convenience
 -- policy "so the client can poll directly" would restore the hole without
--- failing anything else in the suite. The final four assertions (service_role
--- keeps every verb) carry over unchanged from the companion submission
--- BossConsole#530 by @Rushikeshiitb.
+-- failing anything else in the suite. The policy-set assertion below fails on
+-- that - including a policy created without a TO clause, which applies to
+-- everyone and shows up in pg_policies as roles = {public}, where a per-role
+-- check would see neither 'anon' nor 'authenticated' and pass. The four
+-- service_role table-privilege assertions carry over unchanged from the
+-- companion submission BossConsole#530 by @Rushikeshiitb.
 
 begin;
-select plan(18);
+select plan(24);
 
--- 1-4: no policy remains for either client role, service_role keeps its own,
--- and RLS is still enabled.
+-- 1-3: exactly one policy remains - the service_role one - and RLS is still on.
 select is_empty(
     $$ select policyname from pg_policies
        where schemaname = 'public' and tablename = 'completed_authentications'
-         and 'anon' = any(roles) $$,
-    'anon holds no policy on completed_authentications'
-);
-
-select is_empty(
-    $$ select policyname from pg_policies
-       where schemaname = 'public' and tablename = 'completed_authentications'
-         and 'authenticated' = any(roles) $$,
-    'authenticated holds no policy on completed_authentications'
+         and roles <> '{service_role}'::name[] $$,
+    'no policy remains for any role but service_role, unscoped ones included'
 );
 
 -- The service-role policy is the live path and must survive. If this fails, the
@@ -48,9 +43,11 @@ select ok(
     'row level security is still enabled on the table'
 );
 
--- 5-11: no table privilege either, so the gate does not rest on RLS alone.
--- has_table_privilege is checked per verb rather than via ALL, so a partial
--- regrant of a single verb cannot pass.
+-- 4-17: no table privilege either, so the gate does not rest on RLS alone.
+-- has_table_privilege is checked per verb for both client roles rather than via
+-- ALL, so a partial regrant of a single verb cannot pass. TRUNCATE is asserted
+-- for both: it is not subject to row level security at all, so the REVOKE ALL
+-- above is its only gate.
 select ok(
     not has_table_privilege('anon', 'public.completed_authentications', 'SELECT'),
     'anon cannot SELECT the token table'
@@ -67,6 +64,18 @@ select ok(
     not has_table_privilege('anon', 'public.completed_authentications', 'DELETE'),
     'anon cannot DELETE from the token table'
 );
+select ok(
+    not has_table_privilege('anon', 'public.completed_authentications', 'TRUNCATE'),
+    'anon cannot TRUNCATE the token table, which no policy could stop'
+);
+select ok(
+    not has_table_privilege('anon', 'public.completed_authentications', 'REFERENCES'),
+    'anon has no REFERENCES privilege on the token table'
+);
+select ok(
+    not has_table_privilege('anon', 'public.completed_authentications', 'TRIGGER'),
+    'anon has no TRIGGER privilege on the token table'
+);
 
 select ok(
     not has_table_privilege('authenticated', 'public.completed_authentications', 'SELECT'),
@@ -77,11 +86,27 @@ select ok(
     'authenticated cannot INSERT into the token table'
 );
 select ok(
+    not has_table_privilege('authenticated', 'public.completed_authentications', 'UPDATE'),
+    'authenticated cannot UPDATE the token table'
+);
+select ok(
     not has_table_privilege('authenticated', 'public.completed_authentications', 'DELETE'),
     'authenticated cannot DELETE from the token table'
 );
+select ok(
+    not has_table_privilege('authenticated', 'public.completed_authentications', 'TRUNCATE'),
+    'authenticated cannot TRUNCATE the token table, which no policy could stop'
+);
+select ok(
+    not has_table_privilege('authenticated', 'public.completed_authentications', 'REFERENCES'),
+    'authenticated has no REFERENCES privilege on the token table'
+);
+select ok(
+    not has_table_privilege('authenticated', 'public.completed_authentications', 'TRIGGER'),
+    'authenticated has no TRIGGER privilege on the token table'
+);
 
--- 12-15: the live path must keep working. If any of these fails, the migration
+-- 18-21: the live path must keep working. If any of these fails, the migration
 -- went too far and the Edge Function can no longer store or read the handoff.
 -- (Carried over from BossConsole#530, @Rushikeshiitb.)
 select ok(
@@ -101,7 +126,7 @@ select ok(
     'service_role can still DELETE from the token table'
 );
 
--- 16-18: the expired-row cleanup RPC keeps no client handle either. It returns
+-- 22-24: the expired-row cleanup RPC keeps no client handle either. It returns
 -- void, so this is not a data leak, but after the table revoke it could do
 -- nothing as a client anyway; the grants are dead weight on a token table.
 select ok(
