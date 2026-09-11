@@ -97,7 +97,7 @@ object FileIcons {
 
         // Handle by extension
         return when (extension) {
-            // Shell scripts - delegate to LanguageIcons
+            // Windows batch - PowerShell icon, deliberately not the language mapping
 
             "bat", "cmd" -> {
                 FileIconInfo(LanguageIcons.powershell, LanguageIcons.Colors.powershell)
@@ -175,7 +175,6 @@ object FileIcons {
             }
 
             // Databases
-
             "db", "sqlite", "sqlite3" -> {
                 FileIconInfo(database, LanguageIcons.Colors.sqlite)
             }
