@@ -10,10 +10,12 @@
 -- These assertions are about the absence of access, which is exactly the kind of
 -- thing that is easy to reintroduce: a later migration adding a convenience
 -- policy "so the client can poll directly" would restore the hole without
--- failing anything else in the suite.
+-- failing anything else in the suite. The final four assertions (service_role
+-- keeps every verb) carry over unchanged from the companion submission
+-- BossConsole#530 by @Rushikeshiitb.
 
 begin;
-select plan(11);
+select plan(15);
 
 -- 1-4: no policy remains for either client role, service_role keeps its own,
 -- and RLS is still enabled.
@@ -77,6 +79,26 @@ select ok(
 select ok(
     not has_table_privilege('authenticated', 'public.completed_authentications', 'DELETE'),
     'authenticated cannot DELETE from the token table'
+);
+
+-- 12-15: the live path must keep working. If any of these fails, the migration
+-- went too far and the Edge Function can no longer store or read the handoff.
+-- (Carried over from BossConsole#530, @Rushikeshiitb.)
+select ok(
+    has_table_privilege('service_role', 'public.completed_authentications', 'SELECT'),
+    'service_role can still SELECT the token table'
+);
+select ok(
+    has_table_privilege('service_role', 'public.completed_authentications', 'INSERT'),
+    'service_role can still INSERT into the token table'
+);
+select ok(
+    has_table_privilege('service_role', 'public.completed_authentications', 'UPDATE'),
+    'service_role can still UPDATE the token table'
+);
+select ok(
+    has_table_privilege('service_role', 'public.completed_authentications', 'DELETE'),
+    'service_role can still DELETE from the token table'
 );
 
 select * from finish();
