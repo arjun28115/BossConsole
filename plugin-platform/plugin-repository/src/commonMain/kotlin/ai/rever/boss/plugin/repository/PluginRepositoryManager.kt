@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.repository
 
+import ai.rever.boss.plugin.dependency.SemanticVersion
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
 import kotlinx.coroutines.async
@@ -367,23 +368,35 @@ class PluginRepositoryManager {
         }
 
     /**
-     * Compare two version strings to determine if the first is newer.
+     * True when [candidate] is a genuine upgrade over [installed].
+     *
+     * Delegates to [SemanticVersion], which documents itself as the sole
+     * version-comparison primitive for plugin update and floor checks, and which
+     * PluginUpdateManager already uses. The hand-rolled comparison this
+     * replaced split on "." and dropped any segment that was not a bare integer,
+     * which shifted every later segment into the wrong position: "1.0.0+build.7"
+     * became [1, 7] and so read as newer than an installed "1.0.0", offering an
+     * update to the version already installed on every check.
+     *
+     * An unparseable [candidate] is never offered, because nothing can be said
+     * about it. An unparseable [installed] with a parseable [candidate] IS
+     * offered: that is a plugin whose recorded version is already broken, and
+     * withholding the update would strand it there permanently. Internal for
+     * test access.
      */
-    private fun isNewerVersion(
-        version1: String,
-        version2: String,
+    internal fun isNewerVersion(
+        candidate: String,
+        installed: String,
     ): Boolean {
-        val v1Parts = version1.split(".").mapNotNull { it.toIntOrNull() }
-        val v2Parts = version2.split(".").mapNotNull { it.toIntOrNull() }
-
-        for (i in 0 until maxOf(v1Parts.size, v2Parts.size)) {
-            val v1 = v1Parts.getOrElse(i) { 0 }
-            val v2 = v2Parts.getOrElse(i) { 0 }
-
-            if (v1 > v2) return true
-            if (v1 < v2) return false
+        val candidateVersion = SemanticVersion.parse(candidate)
+        val installedVersion = SemanticVersion.parse(installed)
+        // Single expression rather than early returns: detekt caps this function at
+        // two, and widening the rule to keep a guard-clause shape would be the wrong
+        // trade for three mutually exclusive cases.
+        return when {
+            candidateVersion == null -> false
+            installedVersion == null -> true
+            else -> candidateVersion > installedVersion
         }
-
-        return false
     }
 }
