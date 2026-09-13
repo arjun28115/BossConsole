@@ -7,6 +7,7 @@ import ai.rever.boss.keymap.model.recordedModifiers
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -64,8 +65,7 @@ class PrimaryModifierRuleTest {
 
     @Test
     fun `off macOS the Super key no longer fires either spelling`() {
-        // The deliberate loss. Super was never nameable in the vocabulary or producible by the
-        // recorder, so what goes is an accidental behaviour no surface could display.
+        // Legacy Super bindings were stored as Ctrl and now fire on Control instead.
         assertFalse(pressed(hasCtrl = true, metaDown = true, isMacOS = false))
         assertFalse(pressed(hasCmd = true, metaDown = true, isMacOS = false))
     }
@@ -84,7 +84,7 @@ class PrimaryModifierRuleTest {
     }
 
     // ---------------------------------------------------------------------
-    // Record then match. This is the assertion that would have caught #553.
+    // Record then match. This prevents future drift between capture and dispatch.
     // ---------------------------------------------------------------------
 
     @Test
@@ -102,11 +102,8 @@ class PrimaryModifierRuleTest {
                 }
             }
 
-        // Off macOS a Super press records NO primary modifier, so what comes back is a plain chord,
-        // and a plain chord must refuse a held modifier. That case is not round-trippable by design
-        // and is asserted on its own below; excluding it here rather than weakening the assertion
-        // keeps this one exact.
-        for ((mac, meta, control) in cases.filter { (mac, meta, control) -> mac || !meta || control }) {
+        // Super captures are rejected off macOS, including Super+Control.
+        for ((mac, meta, control) in cases.filter { (mac, meta, control) -> mac || !meta }) {
             val recorded =
                 recordedModifiers(
                     metaDown = meta,
@@ -115,7 +112,7 @@ class PrimaryModifierRuleTest {
                     altDown = false,
                     isMacOS = mac,
                 )
-            val modifiers = canonicalModifiers(recorded)
+            val modifiers = canonicalModifiers(requireNotNull(recorded))
             assertTrue(
                 primaryModifierPressed(
                     hasCmd = "cmd" in modifiers,
@@ -131,10 +128,8 @@ class PrimaryModifierRuleTest {
     }
 
     @Test
-    fun `off macOS a Super press records no primary modifier`() {
-        // It used to record "Ctrl", which the old matcher then fired on Super. After the collapse
-        // no spelling means Super, so recording one would hand back a binding that fires on a key
-        // the user did not press. Shift and Alt still come through, so the chord is not lost.
+    fun `off macOS a Super press is rejected instead of saving a plain chord`() {
+        // A held unsupported modifier must not disappear from the saved shortcut.
         val recorded =
             recordedModifiers(
                 metaDown = true,
@@ -144,7 +139,10 @@ class PrimaryModifierRuleTest {
                 isMacOS = false,
             )
 
-        assertEquals(listOf("Shift"), recorded)
+        assertNull(recorded)
+        assertNull(
+            recordedModifiers(metaDown = true, controlDown = true, shiftDown = false, altDown = false, isMacOS = false),
+        )
     }
 
     @Test

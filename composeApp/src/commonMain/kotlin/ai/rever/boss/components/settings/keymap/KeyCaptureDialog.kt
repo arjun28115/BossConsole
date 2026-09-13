@@ -46,6 +46,7 @@ fun KeyCaptureDialog(
     var capturedKey by remember { mutableStateOf<Key?>(null) }
     var capturedModifiers by remember { mutableStateOf<List<String>>(emptyList()) }
     var hasCapture by remember { mutableStateOf(false) }
+    var unsupportedCapture by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
 
     LaunchedEffect(Unit) {
@@ -158,7 +159,7 @@ fun KeyCaptureDialog(
                                     // as "Ctrl", which agreed with the old matcher and disagreed
                                     // with both the default preset and the string this dialog
                                     // shows the user one line below. See recordedModifiers.
-                                    capturedModifiers =
+                                    val modifiers =
                                         recordedModifiers(
                                             metaDown = event.isMetaPressed,
                                             controlDown = event.isCtrlPressed,
@@ -166,7 +167,9 @@ fun KeyCaptureDialog(
                                             altDown = event.isAltPressed,
                                             isMacOS = SystemUtils.isMacOS,
                                         )
-                                    hasCapture = true
+                                    unsupportedCapture = modifiers == null
+                                    capturedModifiers = modifiers.orEmpty()
+                                    hasCapture = modifiers != null
                                     true
                                 } else {
                                     false
@@ -185,7 +188,12 @@ fun KeyCaptureDialog(
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
                             Text(
-                                text = "Press any key combination...",
+                                text =
+                                    if (unsupportedCapture) {
+                                        "Super shortcuts are unsupported. Choose another combination."
+                                    } else {
+                                        "Press any key combination..."
+                                    },
                                 fontSize = 16.sp,
                                 fontWeight = FontWeight.Medium,
                                 color = BossTheme.colors.textSecondary,

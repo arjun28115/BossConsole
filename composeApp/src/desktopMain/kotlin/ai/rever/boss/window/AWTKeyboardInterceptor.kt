@@ -410,8 +410,8 @@ object AWTKeyboardInterceptor {
 
     /**
      * The physical modifier keycode that sustains an MRU tab cycle for [keystroke], mirroring
-     * the platform-aware mapping in findMatchingBinding: a "Ctrl" chord is the Control key
-     * on macOS but the Meta key on Windows/Linux (and vice-versa for a "Cmd" chord).
+     * the platform-aware mapping in findMatchingBinding: "Ctrl" always means Control,
+     * while "Cmd" means Meta on macOS and Control on Windows/Linux.
      *
      * Takes the keystroke the event MATCHED rather than the binding, so an alternate spelled
      * with the other primary modifier arms the modifier the user is actually holding. Arming
