@@ -107,6 +107,11 @@ private class DesktopFilePickerProvider : FilePickerProvider {
                     if (suggestedFileName != null) {
                         dialog.file = suggestedFileName
                     }
+                    if (!filters.isNullOrEmpty()) {
+                        dialog.setFilenameFilter { _, name ->
+                            filters.any { ext -> name.endsWith(".$ext", ignoreCase = true) }
+                        }
+                    }
                     dialog.showModal(directories = false)
                     val dir = dialog.directory
                     val file = dialog.file
