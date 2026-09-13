@@ -33,3 +33,13 @@ can perform a write: table grants and other restrictive policies still apply:
 G2 is asserted as a subset rather than as HEALTHY while the two policies #538
 removes are still on `dev`. Once that merges, empty the exception array in
 `client_grant_audit_test.sql.in` and the assertion becomes a plain HEALTHY.
+
+Limits: G1 checks table-wide grants, not column-only grants or views. G2 is
+grant-blind and checks direct client/PUBLIC policy roles, not inherited policy
+roles. It catches the literal-true shape in #488/#538, not #536's always-true
+`session_id IS NOT NULL` predicate. Dedicated table suites remain necessary.
+
+After #538 lands, its `audit_log_insert_rls_test.sql` independently rejects any
+client INSERT policy on secret_access_log and pins the plugin log INSERT policy
+to service_role. Recreating either exception name therefore fails that suite;
+the subset here allows either merge order without requiring a synchronized edit.

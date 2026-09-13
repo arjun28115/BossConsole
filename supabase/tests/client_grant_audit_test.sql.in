@@ -20,6 +20,10 @@ where "check" = 'CHECK G1: client-reachable table without RLS';
 -- subtraction below passes in both states and still fails on anything NEW, so
 -- it gates the regression without encoding the bug's lifetime. When #538 lands,
 -- the array can be emptied and this becomes a plain HEALTHY assertion.
+-- #538 also adds audit_log_insert_rls_test.sql: it rejects every client INSERT
+-- policy on secret_access_log and pins the plugin log policy to service_role.
+-- Those gates catch reintroduction under an exception name after #538 lands;
+-- asserting stale exceptions here would unnecessarily break that merge order.
 select is(
   (select coalesce(
             nullif(
@@ -56,7 +60,7 @@ grant select on public.pgtap_grant_with_rls to authenticated;
 
 -- G1 near miss: no RLS, but no client role can reach it either.
 create table public.pgtap_grant_unreachable(id int);
-revoke all on public.pgtap_grant_unreachable from anon, authenticated;
+revoke all on public.pgtap_grant_unreachable from public, anon, authenticated;
 
 -- G2: permissive INSERT with no TO clause, which is the shape that applies to
 -- PUBLIC and produced all three recurrences.
