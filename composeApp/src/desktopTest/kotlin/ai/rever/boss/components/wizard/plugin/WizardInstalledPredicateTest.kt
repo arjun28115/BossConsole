@@ -120,4 +120,42 @@ class WizardInstalledPredicateTest {
             "with jars present the two agree",
         )
     }
+
+    @Test
+    fun `registration incompatibility is an install failure even when the jar survives`() {
+        val result = Result.success(info("a", PluginState.DISABLED))
+        assertTrue(usableWizardInstallResult(result, exists = { true }, isIncompatible = { true }).isFailure)
+    }
+
+    @Test
+    fun `access-disabled installation remains successful`() {
+        val result = Result.success(info("a", PluginState.DISABLED))
+        assertEquals(result, usableWizardInstallResult(result, exists = { true }, isIncompatible = { false }))
+    }
+
+    @Test
+    fun `loaded installation wins over a stale path and incompatibility marker`() {
+        val result = Result.success(info("a", PluginState.LOADED))
+        assertEquals(result, usableWizardInstallResult(result, exists = { false }, isIncompatible = { true }))
+    }
+
+    @Test
+    fun `missing disabled artifact cannot become an install success`() {
+        val result = Result.success(info("a", PluginState.DISABLED))
+        assertTrue(usableWizardInstallResult(result, exists = { false }, isIncompatible = { false }).isFailure)
+    }
+
+    @Test
+    fun `original loader failure survives without checking installation state`() {
+        val failure = IllegalStateException("loader failed")
+        val result = Result.failure<DynamicPluginInfo>(failure)
+        val actual =
+            usableWizardInstallResult(
+                result,
+                exists = { error("Must not inspect a failed load") },
+                isIncompatible = { error("Must not inspect a failed load") },
+            )
+        assertEquals(failure, actual.exceptionOrNull())
+    }
+
 }
