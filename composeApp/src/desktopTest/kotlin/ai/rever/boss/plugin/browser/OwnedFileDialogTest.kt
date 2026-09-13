@@ -33,8 +33,12 @@ class OwnedFileDialogTest {
 
     @AfterTest
     fun restore() {
-        original?.let { System.setProperty(MAC_DIRECTORY_MODE, it) }
-            ?: System.clearProperty(MAC_DIRECTORY_MODE)
+        val value = original
+        if (value == null) {
+            System.clearProperty(MAC_DIRECTORY_MODE)
+        } else {
+            System.setProperty(MAC_DIRECTORY_MODE, value)
+        }
     }
 
     @Test
@@ -96,6 +100,15 @@ class OwnedFileDialogTest {
             withDirectoryMode(directories = false) { error("panel blew up") }
         }
 
+        assertEquals("true", System.getProperty(MAC_DIRECTORY_MODE))
+    }
+
+    @Test
+    fun `fixture teardown preserves a property present before setup`() {
+        System.setProperty(MAC_DIRECTORY_MODE, "true")
+        val fixture = OwnedFileDialogTest()
+        fixture.capture()
+        fixture.restore()
         assertEquals("true", System.getProperty(MAC_DIRECTORY_MODE))
     }
 
