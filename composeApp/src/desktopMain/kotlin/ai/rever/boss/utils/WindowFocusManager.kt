@@ -300,6 +300,7 @@ internal fun deiconified(extendedState: Int): Int = extendedState and Frame.ICON
 
 /**
  * Undo whatever is keeping [this] off the screen, before something tries to focus it.
+ * Call before toFront(): an iconified frame must first be restored.
  *
  * Two different states hide a window and only one of them was handled. The comment this
  * replaced said "make window visible if minimized" and then tested `isVisible`, but a
