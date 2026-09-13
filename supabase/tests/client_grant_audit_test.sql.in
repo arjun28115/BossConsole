@@ -1,7 +1,7 @@
 -- Exercise the standing client-grant audit against the real schema, then prove
 -- each check detects the shape it exists for and ignores the shapes it must not.
 begin;
-select plan(10);
+select plan(11);
 
 create temporary table grant_snapshot as
 \ir ../audit/client_grant_audit.sql
@@ -94,6 +94,11 @@ grant insert on public.pgtap_policy_scoped_write to authenticated;
 create policy pgtap_scoped_write on public.pgtap_policy_scoped_write
   for insert to authenticated with check (owner = auth.uid());
 
+-- A restrictive true predicate cannot open access: it is ANDed with the
+-- scoped permissive policy above, and should not make a safe migration fail CI.
+create policy pgtap_restrictive_true on public.pgtap_policy_scoped_write
+  as restrictive for insert to authenticated with check (true);
+
 create temporary table grant_planted as
 \ir ../audit/client_grant_audit.sql
 
@@ -113,6 +118,9 @@ from grant_planted where "check" = 'CHECK G2: permissive write policy for a clie
 select ok(finding not like '%pgtap_open_select%', 'G2 ignores a permissive SELECT policy')
 from grant_planted where "check" = 'CHECK G2: permissive write policy for a client role';
 select ok(finding not like '%pgtap_scoped_write%', 'G2 ignores a write policy that restricts')
+from grant_planted where "check" = 'CHECK G2: permissive write policy for a client role';
+
+select ok(finding not like '%pgtap_restrictive_true%', 'G2 ignores a restrictive true policy')
 from grant_planted where "check" = 'CHECK G2: permissive write policy for a client role';
 
 select * from finish();

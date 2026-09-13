@@ -19,12 +19,13 @@ not assert that all existing identity surfaces have been authorized correctly.
 Those findings need human review of the actual callers and policies.
 
 `client_grant_audit.sql` is the companion that asks who can WRITE rather than who
-can read. Both its checks are exact catalog facts and both gate CI:
+can read. Both checks gate CI. G2 is a structural lint, not proof that a client
+can perform a write: table grants and other restrictive policies still apply:
 
 * **G1** names any `public` table a client role can reach that does not enable
   RLS. There is no allowlist, because every table in the schema enables RLS
   today.
-* **G2** names any `INSERT`, `UPDATE`, `DELETE` or `ALL` policy reachable by
+* **G2** names any PERMISSIVE `INSERT`, `UPDATE`, `DELETE` or `ALL` policy reachable by
   `anon`, `authenticated` or PUBLIC whose predicate is the literal `true`. It
   keys on the predicate, not on a missing `TO` clause: most policies here omit
   `TO`, so that alone would report most of the schema.

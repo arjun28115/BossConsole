@@ -1,7 +1,8 @@
 -- Client-grant audit for schema `public`. Run it against the project and read
 -- the `finding` column: HEALTHY means that check passed. Any other value names
--- the object to investigate. Both checks here are exact catalog facts rather
--- than heuristics, so neither needs human judgement to interpret.
+-- the object to investigate. G1 checks effective table privileges. G2 is a structural policy lint, not
+-- a proof of effective write access: table ACLs and other restrictive policies
+-- can still deny a write. Review a reported policy before changing access.
 --
 -- This is the companion to identity_disclosure_audit.sql, which asks who can
 -- READ identity. This one asks a narrower question that the other deliberately
@@ -67,7 +68,9 @@ union all
 -- ---------------------------------------------------------------------------
 -- CHECK G2: no write policy reachable by a client role is a rubber stamp.
 --
--- A policy whose predicate is the literal `true` adds no restriction. On SELECT
+-- A PERMISSIVE policy whose predicate is literal `true` can open access.
+-- A RESTRICTIVE policy is ANDed with permissive policies, so literal true
+-- cannot open a write path and must not be flagged on its own. On SELECT
 -- that is sometimes intended, and the identity audit's CHECK 3 already covers
 -- the identity-bearing case. On INSERT, UPDATE or DELETE it means any caller
 -- holding the role may write any row, which is what produced all three
@@ -96,6 +99,7 @@ select 'CHECK G2: permissive write policy for a client role' as "check",
        ) as finding
 from pg_policies pol
 where pol.schemaname = 'public'
+  and pol.permissive = 'PERMISSIVE'
   and pol.cmd in ('INSERT', 'UPDATE', 'DELETE', 'ALL')
   and pol.roles && array['anon', 'authenticated', 'public']::name[]
   and (
