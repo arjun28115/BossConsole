@@ -31,7 +31,7 @@ class FilePickerDeliveryTest {
 
         deliver("/home/u/report.csv")
 
-        assertEquals(listOf("/home/u/report.csv"), seen)
+        assertEquals(listOf<String?>("/home/u/report.csv"), seen)
     }
 
     @Test
@@ -93,13 +93,13 @@ class FilePickerDeliveryTest {
     @Test
     fun `surrounding whitespace and blank entries are dropped`() {
         assertEquals(listOf("csv"), normalizedExtensions(listOf("  .csv  ")))
-        assertEquals(emptyList(), normalizedExtensions(listOf("", "   ", ".")))
+        assertEquals(emptyList<String>(), normalizedExtensions(listOf("", "   ", ".")))
     }
 
     @Test
     fun `no filter and an empty filter are the same thing`() {
-        assertEquals(emptyList(), normalizedExtensions(null))
-        assertEquals(emptyList(), normalizedExtensions(emptyList()))
+        assertEquals(emptyList<String>(), normalizedExtensions(null))
+        assertEquals(emptyList<String>(), normalizedExtensions(emptyList()))
     }
 
     @Test

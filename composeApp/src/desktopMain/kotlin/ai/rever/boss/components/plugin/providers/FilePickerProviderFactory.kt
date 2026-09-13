@@ -95,6 +95,10 @@ internal fun deliverOnce(onResult: (String?) -> Unit): (String?) -> Unit {
 private class DesktopFilePickerProvider : FilePickerProvider {
     private val isMacOS = System.getProperty("os.name").lowercase().contains("mac")
 
+    // The spread is over a plugin's declared filter list, a handful of entries at most, and
+    // FileNameExtensionFilter is Java varargs with no collection overload to prefer. Same
+    // reasoning, and the same suppression, as NativeFileDialogs.onOpenFiles.
+    @Suppress("SpreadOperator")
     override fun pickFile(
         title: String?,
         filters: List<String>?,
@@ -154,6 +158,7 @@ private class DesktopFilePickerProvider : FilePickerProvider {
         }
     }
 
+    @Suppress("SpreadOperator")
     override fun pickSaveFile(
         suggestedFileName: String?,
         filters: List<String>?,
