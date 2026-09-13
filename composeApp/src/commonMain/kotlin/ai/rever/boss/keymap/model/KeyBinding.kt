@@ -44,10 +44,9 @@ internal fun canonicalModifiers(modifiers: List<String>): Set<String> =
  * shortcut that could not fire. That was the whole of BossConsole#553, and the default preset's
  * Ctrl+Tab was its most visible instance rather than its cause.
  *
- * The deliberate consequence is that Super cannot be bound off macOS. It could not be bound through
- * the UI before either: [canonicalModifiers] has no token for it, so nothing could name it, and the
- * recorder stores a Super press as "Cmd". What goes is an accidental behaviour no surface could
- * display, not a capability.
+ * Super bindings recorded by the old dialog as "Ctrl" now fire on Control off macOS.
+ * That is a compatibility change: the old UI could record Super, though it displayed "Ctrl".
+ * Unsupported new Super captures are rejected rather than silently saving a different chord.
  */
 internal fun primaryModifierPressed(
     hasCmd: Boolean,
@@ -75,11 +74,11 @@ internal fun primaryModifierPressed(
  * Off macOS only Control is, and it is recorded as "Ctrl". That is the spelling
  * [KeyStroke.displayString] renders on that platform and the spelling the default preset already
  * uses, so what is written down, what is shown and what fires are the same thing. A Super press
- * records NO primary modifier, because after the collapse no spelling means Super: recording one
- * would hand back a binding that fires on a key the user did not press.
+ * returns null: callers must reject it rather than silently dropping a held modifier.
  *
  * "Cmd" remains accepted on read, so keymaps written by the previous capture dialog, which recorded
- * a Control press as "Cmd" off macOS, keep working untouched. Nothing needs migrating.
+ * a Control press as "Cmd" off macOS, keep working untouched. Legacy "Ctrl" bindings
+ * previously fired on Super and now fire on Control; their intended modifier cannot be inferred.
  */
 internal fun recordedModifiers(
     metaDown: Boolean,
@@ -87,16 +86,20 @@ internal fun recordedModifiers(
     shiftDown: Boolean,
     altDown: Boolean,
     isMacOS: Boolean,
-): List<String> =
-    buildList {
-        if (isMacOS) {
-            if (metaDown) add("Cmd")
-            if (controlDown) add("Ctrl")
-        } else {
-            if (controlDown) add("Ctrl")
+): List<String>? =
+    if (!isMacOS && metaDown) {
+        null
+    } else {
+        buildList {
+            if (isMacOS) {
+                if (metaDown) add("Cmd")
+                if (controlDown) add("Ctrl")
+            } else {
+                if (controlDown) add("Ctrl")
+            }
+            if (shiftDown) add("Shift")
+            if (altDown) add("Alt")
         }
-        if (shiftDown) add("Shift")
-        if (altDown) add("Alt")
     }
 
 /**
@@ -570,7 +573,7 @@ data class KeyBinding(
                 // dialog's (#329); this copy has no caller today, which is exactly why it would
                 // have been the one to survive.
                 key = storedKeyName(key),
-                modifiers = modifiers,
+                modifiers = requireNotNull(modifiers) { "Super shortcuts are unsupported on this platform" },
                 context = context,
                 enabled = true,
                 category = category,
@@ -583,9 +586,8 @@ data class KeyBinding(
         // consulted by neither matcher; now that both walk allKeystrokes it would be wrong in
         // both directions, so it is gone rather than left as a trap. On macOS the alternate
         // really fires, so Ctrl+N would open a window as well as Cmd+N. On Windows and Linux
-        // "Ctrl" maps to isMetaDown, so the alternate demands the Super key and is unreachable
-        // - while the Cmd primary already matches the Control key, which is the whole thing the
-        // helper was reaching for. No preset ever used it.
+        // both spellings now match Control, so the alternate merely duplicates the primary.
+        // No preset ever used it.
 
         /**
          * Creates a KeyBinding with multiple keystrokes.
