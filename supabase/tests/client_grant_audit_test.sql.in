@@ -20,8 +20,8 @@ where "check" = 'CHECK G1: client-reachable table without RLS';
 -- subtraction below passes in both states and still fails on anything NEW, so
 -- it gates the regression without encoding the bug's lifetime. When #538 lands,
 -- the array can be emptied and this becomes a plain HEALTHY assertion.
--- #538 also adds audit_log_insert_rls_test.sql: it rejects every client INSERT
--- policy on secret_access_log and pins the plugin log policy to service_role.
+-- #538 also adds audit_log_insert_rls_test.sql: it rejects the named
+-- secret_access_log_insert policy and pins the plugin log policy to service_role.
 -- Those gates catch reintroduction under an exception name after #538 lands;
 -- asserting stale exceptions here would unnecessarily break that merge order.
 select is(
