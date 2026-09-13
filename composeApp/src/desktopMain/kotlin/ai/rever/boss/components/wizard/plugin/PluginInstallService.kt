@@ -215,7 +215,8 @@ class PluginInstallService(
 
                     // Install the plugin
                     onProgress(progress + (0.6f / totalPlugins), "Loading ${plugin.name}...")
-                    val installResult = dynamicPluginManager.installPlugin(jarPath, enabled = true)
+                    val installResult =
+                    usableWizardInstallResult(dynamicPluginManager.installPlugin(jarPath, enabled = true))
 
                     if (installResult.isSuccess) {
                         // Only a plugin that actually registered: `installPlugin` returns success
@@ -319,16 +320,6 @@ class PluginInstallService(
         }
 
     /**
-     * Install a plugin from GitHub.
-     * Downloads the release JAR directly from GitHub releases.
-     */
-
-    /**
-     * The manifest id is authoritative, so a mismatch with the wizard's expectation is logged and
-     * the install continues.
-     */
-
-    /**
      * Plugin ids that are installed AND usable, by the codebase's single definition.
      *
      * Recomputed per call rather than hoisted: the loop installs plugins, so a snapshot taken
@@ -341,6 +332,10 @@ class PluginInstallService(
             isIncompatible = { PluginCrashRegistry.isIncompatible(it) },
         )
 
+    /**
+     * The manifest id is authoritative, so a mismatch with the wizard's expectation is logged and
+     * the install continues.
+     */
     private fun warnOnIdMismatch(
         plugin: WizardPluginInfo,
         manifest: PluginManifest,
@@ -401,7 +396,8 @@ class PluginInstallService(
                 onProgress(baseProgress + (0.7f / totalPlugins), "Installing ${plugin.name}...")
 
                 // Install the plugin
-                val installResult = dynamicPluginManager.installPlugin(jarPath, enabled = true)
+                val installResult =
+                    usableWizardInstallResult(dynamicPluginManager.installPlugin(jarPath, enabled = true))
 
                 val installed =
                     installResult.getOrNull()
@@ -673,5 +669,26 @@ class PluginInstallService(
          * Create a PluginInstallService with the given DynamicPluginManager.
          */
         fun create(dynamicPluginManager: DynamicPluginManager): PluginInstallService = PluginInstallService(dynamicPluginManager)
+    }
+}
+
+/** Reject unloaded binary-incompatible results before either wizard path persists success. */
+internal fun usableWizardInstallResult(
+    result: Result<DynamicPluginInfo>,
+    exists: (String) -> Boolean = { File(it).isFile },
+    isIncompatible: (String) -> Boolean = { PluginCrashRegistry.isIncompatible(it) },
+): Result<DynamicPluginInfo> {
+    val installed = result.getOrNull() ?: return result
+    val id = installed.manifest.pluginId
+    val usable =
+        PluginDependencyResolution.installedAndOnDisk(
+            states = mapOf(id to installed),
+            exists = exists,
+            isIncompatible = isIncompatible,
+        )
+    return if (id in usable) {
+        result
+    } else {
+        Result.failure(IllegalStateException("Tool did not become usable after installation: $id"))
     }
 }
