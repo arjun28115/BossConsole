@@ -40,6 +40,6 @@ roles. It catches the literal-true shape in #488/#538, not #536's always-true
 `session_id IS NOT NULL` predicate. Dedicated table suites remain necessary.
 
 After #538 lands, its `audit_log_insert_rls_test.sql` independently rejects any
-client INSERT policy on secret_access_log and pins the plugin log INSERT policy
+recreated secret_access_log_insert policy and pins the plugin log INSERT policy
 to service_role. Recreating either exception name therefore fails that suite;
 the subset here allows either merge order without requiring a synchronized edit.
