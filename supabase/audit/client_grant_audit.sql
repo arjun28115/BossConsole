@@ -15,7 +15,15 @@
 -- shipped with a permissive write policy on top of that inherited grant:
 -- plugin_downloads (#488), completed_authentications (#536) and the pair
 -- secret_access_log / plugin_api_key_logs (#538). Each was found by a person
--- reading a migration, three separate times.
+-- reading a migration, three separate times. G2 detects the literal-true shape
+-- from #488 and #538, not #536: session_id IS NOT NULL is always true on that
+-- table, but is not a literal predicate. Its dedicated suite remains necessary.
+--
+-- Scope: G1 checks table-wide privileges, not column-only grants or views. G2
+-- intentionally inspects direct TO anon/authenticated/PUBLIC policies without
+-- requiring a table grant, so dormant open policies are caught before regrant.
+-- Policies applying only via membership in another role are outside this lint.
+-- Neither check proves complete authorization or examines updatable views.
 --
 -- 20260908000000_explicit_anon_grants.sql closed the `anon` half of the
 -- inheritance for objects created after it. It deliberately left `authenticated`
@@ -24,7 +32,8 @@
 -- the only thing standing in front of a client role, "RLS is enabled" and "the
 -- policy is not a rubber stamp" stop being style points and become the control.
 --
--- Run it after any migration that creates a table or a policy.
+-- Future-default changes in #586/#592 do not revoke existing object grants.
+-- Run this after any migration that creates a table or a policy.
 
 -- ---------------------------------------------------------------------------
 -- CHECK G1: no table reachable by a client role is missing RLS.
@@ -78,7 +87,7 @@ union all
 --
 -- The discriminating signal is the predicate, NOT a missing `TO` clause. A
 -- policy with no `TO` applies to PUBLIC, which is how all three slipped past
--- review, but 101 of the 128 policies written in this schema omit `TO`. Gating
+-- review in #488/#538, but 101 of the 128 policies written in this schema omit `TO`. Gating
 -- on that alone would report most of the schema and be switched off within a
 -- week. Taken together, "write" plus "client role" plus "literally true" matches
 -- two policies in the whole schema and nothing else.
