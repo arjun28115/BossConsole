@@ -247,4 +247,9 @@ class WindowFocusManagerTest {
         assertEquals(java.awt.Frame.NORMAL, deiconified(java.awt.Frame.NORMAL))
         assertEquals(java.awt.Frame.MAXIMIZED_BOTH, deiconified(java.awt.Frame.MAXIMIZED_BOTH))
     }
+
+    @Test
+    fun `focusWindow preserves failure behavior for invalid or unregistered target`() {
+        assertFalse(WindowFocusManager.focusWindow("invalid-unregistered-id"))
+    }
 }
