@@ -8,11 +8,14 @@ import ai.rever.boss.plugin.PluginPersistence
 import ai.rever.boss.plugin.PluginStoreSetup
 import ai.rever.boss.plugin.api.PluginManifest
 import ai.rever.boss.plugin.api.PluginState
+import ai.rever.boss.plugin.loader.PluginSignatureSidecar
 import ai.rever.boss.plugin.repository.PluginWithSource
 import ai.rever.boss.plugin.sandbox.ui.PluginCrashRegistry
 import ai.rever.boss.utils.atomicMoveFrom
 import ai.rever.boss.utils.logging.BossLogger
+import ai.rever.boss.utils.logging.ComponentLogger
 import ai.rever.boss.utils.logging.LogCategory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -33,6 +36,11 @@ class PluginInstallService(
     /** Raises the install-time dependency prompt; see [MissingDependencyReporter]. */
     private val dependencyReporter: MissingDependencyReporter =
         MissingDependencyReporter.forManager(dynamicPluginManager),
+    /**
+     * Whether the loader still holds an id, which a DISABLED manager entry does not tell us.
+     * Injected for the same reason [dependencyReporter] is: so a test can drive the decision.
+     */
+    private val isResident: (String) -> Boolean = { dynamicPluginManager.isPluginResident(it) },
 ) {
     private val logger = BossLogger.forComponent("PluginInstallService")
 
@@ -180,7 +188,9 @@ class PluginInstallService(
 
                     // Download the latest version of the plugin (pass null for version)
                     onProgress(progress + (0.2f / totalPlugins), "Downloading ${plugin.name}...")
-                    val tempPath = File(pluginDir, "${plugin.id}-downloading.jar").absolutePath
+                    // Unique and not `.jar`: a fixed name is scannable as a plugin and two
+                    // installs of the same id would collide on it.
+                    val tempPath = File(pluginDir, stagingNameFor("${plugin.id}.jar")).absolutePath
                     val downloadResult = repositoryManager.downloadPlugin(plugin.id, null, tempPath)
                     val downloadedPath: String? = downloadResult.getOrNull()
 
@@ -205,18 +215,18 @@ class PluginInstallService(
 
                     // Rename to include actual version
                     val finalFile = File(pluginDir, "${plugin.id}-$actualVersion.jar")
-                    val downloadedFile = File(downloadedPath)
-                    if (downloadedFile.absolutePath != finalFile.absolutePath) {
-                        // Was delete-then-renameTo, which works on Windows but leaves a window in
-                        // which neither file exists — a crash there loses an installed plugin jar.
-                        finalFile.atomicMoveFrom(downloadedFile)
-                    }
                     val jarPath = finalFile.absolutePath
 
-                    // Install the plugin
+                    // Install the plugin. The manifest id is what the loader refuses on, so
+                    // residency is asked about that rather than the wizard's expectation.
                     onProgress(progress + (0.6f / totalPlugins), "Loading ${plugin.name}...")
                     val installResult =
-                    usableWizardInstallResult(dynamicPluginManager.installPlugin(jarPath, enabled = true))
+                        stageAndInstall(
+                            downloadedFile = File(downloadedPath),
+                            finalFile = finalFile,
+                            pluginId = manifest?.pluginId ?: plugin.id,
+                            isResident = isResident,
+                        ) { usableWizardInstallResult(dynamicPluginManager.installPlugin(it, enabled = true)) }
 
                     if (installResult.isSuccess) {
                         // Only a plugin that actually registered: `installPlugin` returns success
@@ -263,8 +273,8 @@ class PluginInstallService(
                                 "error" to error,
                             ),
                         )
-                        // Clean up the JAR on failed install
-                        finalFile.delete()
+                        // No delete here: stageAndInstall owns whatever it put at the destination,
+                        // and refuses outright rather than replacing anything already installed.
                         failedIds.add(plugin.id to error)
                     }
                 } catch (e: Exception) {
@@ -368,36 +378,44 @@ class PluginInstallService(
             try {
                 onProgress(baseProgress + (0.1f / totalPlugins), "Checking GitHub releases for ${plugin.name}...")
 
-                // Parse GitHub URL to get owner/repo
-                val regex = Regex("https://github\\.com/([^/]+)/([^/]+)(?:/.*)?")
-                val match =
-                    regex.matchEntire(plugin.githubUrl.trim().trimEnd('/'))
+                val (owner, repo) =
+                    ownerAndRepo(plugin.githubUrl)
                         ?: return@withContext Result.failure(Exception("Invalid GitHub URL format"))
-
-                val owner = match.groupValues[1]
-                val repo = match.groupValues[2].removeSuffix(".git")
 
                 // Try to download from GitHub releases
                 onProgress(baseProgress + (0.2f / totalPlugins), "Downloading ${plugin.name} from GitHub...")
 
-                val jarPath =
+                val stagedPath =
                     downloadFromGitHubRelease(owner, repo, pluginDir)
                         ?: return@withContext Result.failure(Exception("No JAR found in GitHub releases for $owner/$repo"))
+                val staged = File(stagedPath)
 
                 onProgress(baseProgress + (0.6f / totalPlugins), "Extracting manifest for ${plugin.name}...")
 
-                // Extract manifest from JAR
+                // Read the manifest from the STAGED file. Nothing has touched the installed
+                // artifact yet, so an unreadable manifest costs only the download.
                 val manifest =
-                    extractManifestFromJar(jarPath)
-                        ?: return@withContext Result.failure(Exception("Downloaded JAR does not contain valid plugin manifest"))
+                    extractManifestFromJar(stagedPath)
+                        ?: run {
+                            SignedArtifact(staged).delete()
+                            return@withContext Result.failure(
+                                Exception("Downloaded JAR does not contain valid plugin manifest"),
+                            )
+                        }
 
                 warnOnIdMismatch(plugin, manifest)
 
                 onProgress(baseProgress + (0.7f / totalPlugins), "Installing ${plugin.name}...")
 
-                // Install the plugin
+                // Same guarded promotion the Store path uses.
+                val finalFile = finalFileForStaged(staged)
                 val installResult =
-                    usableWizardInstallResult(dynamicPluginManager.installPlugin(jarPath, enabled = true))
+                    stageAndInstall(
+                        downloadedFile = staged,
+                        finalFile = finalFile,
+                        pluginId = manifest.pluginId,
+                        isResident = isResident,
+                    ) { usableWizardInstallResult(dynamicPluginManager.installPlugin(it, enabled = true)) }
 
                 val installed =
                     installResult.getOrNull()
@@ -405,23 +423,7 @@ class PluginInstallService(
                             installResult.exceptionOrNull() ?: Exception("Install failed"),
                         )
 
-                // Persist the installation
-                PluginPersistence.addInstalledPlugin(
-                    pluginId = manifest.pluginId,
-                    jarPath = jarPath,
-                    enabled = true,
-                    sourceUrl = plugin.githubUrl,
-                    installedVersion = manifest.version,
-                )
-
-                logger.info(
-                    LogCategory.SYSTEM,
-                    "GitHub plugin installed successfully",
-                    mapOf(
-                        "pluginId" to manifest.pluginId,
-                        "version" to manifest.version,
-                    ),
-                )
+                recordGitHubInstall(manifest, finalFile, plugin.githubUrl, logger)
 
                 Result.success(installed)
             } catch (e: Exception) {
@@ -538,14 +540,13 @@ class PluginInstallService(
                 return null
             }
 
-            // Save to plugin directory
+            // Save to a staging file, never straight to the installed name. Opening the final
+            // file's stream truncates an installed artifact before the manifest has been read or
+            // the loader consulted, so a refusal, or a stream that died halfway, left partial bytes
+            // at the path `installed.json` still names.
             pluginDir.mkdirs()
-            val targetFile = File(pluginDir, jarName)
-            jarConnection.inputStream.use { input ->
-                targetFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            }
+            val targetFile = File(pluginDir, stagingNameFor(jarName))
+            writeStagedDownload(jarConnection.inputStream, targetFile)
 
             logger.info(
                 LogCategory.SYSTEM,
@@ -670,6 +671,211 @@ class PluginInstallService(
          */
         fun create(dynamicPluginManager: DynamicPluginManager): PluginInstallService = PluginInstallService(dynamicPluginManager)
     }
+}
+
+/**
+ * Marks a download still in flight. Deliberately breaks the `.jar` suffix so a directory scan cannot
+ * mistake a half-written download for an installed plugin, and carries a nonce so two installs of
+ * the same plugin cannot collide on one staging name.
+ */
+private val GITHUB_URL = Regex("https://github\\.com/([^/]+)/([^/]+)(?:/.*)?")
+
+/**
+ * Owner and repository from a GitHub URL, or null when it is not one.
+ *
+ * Top-level rather than a member: it needs nothing from the service, and that class sits on
+ * detekt's function-count limit. `.git` is stripped because a clone URL is what people paste.
+ */
+internal fun ownerAndRepo(githubUrl: String): Pair<String, String>? {
+    val match = GITHUB_URL.matchEntire(githubUrl.trim().trimEnd('/')) ?: return null
+    return match.groupValues[1] to match.groupValues[2].removeSuffix(".git")
+}
+
+/** Records a completed GitHub install. Top-level for the same reason as [ownerAndRepo]. */
+internal fun recordGitHubInstall(
+    manifest: PluginManifest,
+    finalFile: File,
+    sourceUrl: String,
+    logger: ComponentLogger,
+) {
+    PluginPersistence.addInstalledPlugin(
+        pluginId = manifest.pluginId,
+        jarPath = finalFile.absolutePath,
+        enabled = true,
+        sourceUrl = sourceUrl,
+        installedVersion = manifest.version,
+    )
+    logger.info(
+        LogCategory.SYSTEM,
+        "GitHub plugin installed successfully",
+        mapOf(
+            "pluginId" to manifest.pluginId,
+            "version" to manifest.version,
+        ),
+    )
+}
+
+private const val STAGING_MARKER = ".downloading."
+
+internal fun stagingNameFor(installedName: String): String = "$installedName$STAGING_MARKER${System.nanoTime()}"
+
+/** The installed name a staged download is destined for: its name with the staging marker removed. */
+internal fun finalFileForStaged(staged: File): File {
+    // Block body deliberately: as an expression body this fits ktlint's 140-column limit on one
+    // line, which puts it over detekt's 120. The two gates disagree; this satisfies both.
+    val installedName = staged.name.substringBefore(STAGING_MARKER)
+    return File(staged.parentFile, installedName)
+}
+
+/**
+ * Streams a download onto its staging file, removing a partial one if the stream dies.
+ *
+ * Top-level so the nesting lives here rather than deepening `downloadFromGitHubRelease`, which
+ * detekt already watches. A partial staging file is this call's own litter: nothing else knows the
+ * name, so nothing else will clean it up.
+ */
+internal fun writeStagedDownload(
+    input: java.io.InputStream,
+    target: File,
+) {
+    try {
+        input.use { source ->
+            target.outputStream().use { output ->
+                source.copyTo(output)
+            }
+        }
+    } catch (e: java.io.IOException) {
+        // IOException rather than Exception: this is stream and file work, so that is the type it
+        // fails with, and naming it satisfies detekt without a suppression.
+        target.delete()
+        throw e
+    }
+}
+
+/**
+ * A plugin jar and the signature sidecar that belongs to it.
+ *
+ * They move as a unit because they are one fact. A `.sig` asserts the store vetted exactly those
+ * bytes, so a jar promoted without its sidecar loads unsigned, and a sidecar left beside different
+ * bytes is worse than none. `RemotePluginRepository` writes the sidecar beside the DOWNLOAD path, so
+ * promotion is the moment it has to travel; an earlier version of this moved only the jar and left
+ * every signed store install loading without its signature.
+ *
+ * Both suffixes the loader knows are carried: `.sig` and the `.nosig` marker.
+ */
+internal class SignedArtifact(
+    val jar: File,
+) {
+    private val sidecars: List<File>
+        get() =
+            listOf(
+                File(PluginSignatureSidecar.pathFor(jar.absolutePath)),
+                File(PluginSignatureSidecar.unsignablePathFor(jar.absolutePath)),
+            )
+
+    /** Move this artifact onto [destination], sidecar included. */
+    fun moveTo(destination: SignedArtifact) {
+        destination.jar.atomicMoveFrom(jar)
+        sidecars.forEach { sidecar ->
+            if (sidecar.isFile) {
+                File(sidecar.absolutePath.replace(jar.absolutePath, destination.jar.absolutePath))
+                    .atomicMoveFrom(sidecar)
+            }
+        }
+    }
+
+    /** Remove the jar and any sidecar beside it. */
+    fun delete() {
+        jar.delete()
+        sidecars.forEach { it.delete() }
+    }
+}
+
+/**
+ * Install a staged download, refusing rather than overwriting anything already installed.
+ *
+ * Two refusals, both before a single byte moves, because a refusal that arrives afterwards cannot
+ * be undone:
+ *
+ * **The plugin is still resident.** `disablePlugin` unregisters panels and sets DISABLED but never
+ * unloads, so a user-disabled plugin keeps its id in the loader. If its recorded `jarPath` has also
+ * gone stale, `installedAndOnDisk` stops counting it, the wizard offers it again, and `loadPlugin`
+ * refuses the resident id. That refusal used to arrive after the download had been moved over the
+ * installed artifact, and the failure branch then deleted the file `installed.json` still names.
+ *
+ * **The destination is occupied.** Anything already at the installed path belongs to an install that
+ * is not this one, and this function will not replace it. An earlier version moved over it and tried
+ * to roll back on failure; that grew a tail of failure paths of its own (a backup that will not
+ * rename, a promotion that throws between backup and install, a restore that silently fails) and
+ * each one could lose the artifact it existed to protect. Refusing has no such tail: nothing is
+ * overwritten, so nothing needs undoing, and the working plugin on disk is never at risk.
+ *
+ * That makes the cleanup unambiguous. Everything at the destination after the move is this call's
+ * own, so removing it on failure cannot destroy somebody else's artifact.
+ *
+ * [install] is the loader call, injected so the decision and the cleanup are testable without a
+ * DynamicPluginManager.
+ */
+internal suspend fun stageAndInstall(
+    downloadedFile: File,
+    finalFile: File,
+    pluginId: String,
+    isResident: (String) -> Boolean,
+    install: suspend (jarPath: String) -> Result<DynamicPluginInfo>,
+): Result<DynamicPluginInfo> {
+    val staged = SignedArtifact(downloadedFile)
+    val destination = SignedArtifact(finalFile)
+    val movingIntoPlace = downloadedFile.absolutePath != finalFile.absolutePath
+
+    // Both refusals in one place, and both decided before a byte moves: a refusal that arrives
+    // after the move cannot be undone.
+    val refusal =
+        when {
+            isResident(pluginId) -> {
+                "$pluginId is still loaded from an earlier session, so it cannot be reinstalled now. " +
+                    "Restart BOSS, or remove it in the plugin manager, and try again."
+            }
+
+            movingIntoPlace && finalFile.exists() -> {
+                "${finalFile.name} already exists, so $pluginId was not reinstalled over it. " +
+                    "Remove the existing plugin in the plugin manager and try again."
+            }
+
+            else -> {
+                null
+            }
+        }
+    if (refusal != null) {
+        // Only the download is removed. Whatever is installed stays exactly as it was.
+        staged.delete()
+        return Result.failure(IllegalStateException(refusal))
+    }
+
+    if (movingIntoPlace) {
+        // Was delete-then-renameTo, which works on Windows but leaves a window in which neither
+        // file exists - a crash there loses a plugin jar.
+        staged.moveTo(destination)
+    }
+
+    val result =
+        try {
+            install(finalFile.absolutePath)
+        } catch (e: CancellationException) {
+            // Cancellation is not a failed install, and swallowing it would break structured
+            // concurrency. Clear what this call put there, then let it propagate.
+            destination.delete()
+            throw e
+        } catch (
+            @Suppress("TooGenericExceptionCaught") e: Exception,
+        ) {
+            // Deliberately broad: the loader is injected and a plugin's own code runs inside it, so
+            // what it can throw is not knowable here. Without this the exception escaped past the
+            // cleanup and left an unloadable jar at the installed path.
+            Result.failure(e)
+        }
+
+    if (result.isFailure) destination.delete()
+    return result
 }
 
 /** Reject unloaded binary-incompatible results before either wizard path persists success. */

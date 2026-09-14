@@ -157,5 +157,4 @@ class WizardInstalledPredicateTest {
             )
         assertEquals(failure, actual.exceptionOrNull())
     }
-
 }
