@@ -207,11 +207,8 @@ class WizardStagedInstallTest {
                 stale.readText(),
                 "a pre-existing sidecar is not ours to delete either",
             )
-            assertContains(
-                result.exceptionOrNull()?.message.orEmpty(),
-                stale.name,
-                "the refusal has to name the file the user must remove",
-            )
+            // The refusal has to name the file the user must remove, or it is a dead end.
+            assertContains(result.exceptionOrNull()?.message.orEmpty(), stale.name)
         }
     }
 
