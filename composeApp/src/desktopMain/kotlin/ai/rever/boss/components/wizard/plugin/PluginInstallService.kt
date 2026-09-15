@@ -23,6 +23,8 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
+import java.io.IOException
+import java.nio.file.Files
 import java.util.jar.JarFile
 
 /**
@@ -773,22 +775,69 @@ internal class SignedArtifact(
                 File(PluginSignatureSidecar.unsignablePathFor(jar.absolutePath)),
             )
 
-    /** Move this artifact onto [destination], sidecar included. */
+    /** Every path this artifact occupies, whether or not a file is currently there. */
+    private val footprint: List<File> get() = listOf(jar) + sidecars
+
+    /** The first path of this artifact's footprint that is already taken, or null if all are free. */
+    fun firstOccupiedPath(): File? = footprint.firstOrNull { it.exists() }
+
+    /**
+     * Move this artifact onto [destination] as a unit, or leave [destination] as it was found.
+     *
+     * The jar and its sidecar are one fact, but they are two file moves, and refusing an occupied
+     * destination does not make two moves indivisible. The jar used to move first and the sidecar
+     * after, outside any failure boundary: if the second move failed - the final `.sig` path being
+     * a nonempty directory is enough, and a permission change between the check and the move will
+     * do it too - the jar was left sitting at its scannable installed name with its signature
+     * stranded at the staging name, and the occupied-destination refusal then blocked every retry.
+     *
+     * So each published path is recorded as it lands, and a failure deletes exactly those and
+     * nothing else. Deleting rather than moving back is deliberate: every one of these paths was
+     * verified free before the move, so deleting them cannot destroy an artifact this call did not
+     * create, whereas a move back has a failure of its own that would leave the same mess. What is
+     * lost is a download, which the retry re-fetches.
+     */
     fun moveTo(destination: SignedArtifact) {
-        destination.jar.atomicMoveFrom(jar)
-        sidecars.forEach { sidecar ->
-            if (sidecar.isFile) {
-                File(sidecar.absolutePath.replace(jar.absolutePath, destination.jar.absolutePath))
-                    .atomicMoveFrom(sidecar)
+        val published = mutableListOf<File>()
+        try {
+            destination.jar.claimFrom(jar)
+            published += destination.jar
+            for (sidecar in sidecars.filter { it.isFile }) {
+                val target = destination.sidecarMatching(sidecar, jar)
+                target.claimFrom(sidecar)
+                published += target
             }
+        } catch (e: IOException) {
+            // Newest first, though order only matters for readability: these are distinct paths.
+            published.asReversed().forEach { runCatching { it.delete() } }
+            throw e
         }
     }
+
+    /** This artifact's path for [sidecar], which sits beside [sourceJar]. */
+    private fun sidecarMatching(
+        sidecar: File,
+        sourceJar: File,
+    ): File = File(sidecar.absolutePath.replace(sourceJar.absolutePath, jar.absolutePath))
 
     /** Remove the jar and any sidecar beside it. */
     fun delete() {
         jar.delete()
         sidecars.forEach { it.delete() }
     }
+}
+
+/**
+ * Move [source] onto this path, failing rather than replacing whatever is already here.
+ *
+ * Not [atomicMoveFrom]: that passes `REPLACE_EXISTING`, and `ATOMIC_MOVE` on POSIX is `rename(2)`,
+ * which overwrites the target silently - verified on this platform rather than assumed. A promotion
+ * must never replace a file it has not established was absent, so this uses the plain move, whose
+ * documented behaviour is to throw `FileAlreadyExistsException` instead. Atomicity buys nothing
+ * here: the target is verified free, so there is no existing content a reader could catch torn.
+ */
+private fun File.claimFrom(source: File) {
+    Files.move(source.toPath(), toPath())
 }
 
 /**
@@ -810,8 +859,18 @@ internal class SignedArtifact(
  * each one could lose the artifact it existed to protect. Refusing has no such tail: nothing is
  * overwritten, so nothing needs undoing, and the working plugin on disk is never at risk.
  *
- * That makes the cleanup unambiguous. Everything at the destination after the move is this call's
- * own, so removing it on failure cannot destroy somebody else's artifact.
+ * The refusal covers the artifact's whole footprint - the jar and both sidecar names - which is
+ * what makes the cleanup unambiguous: every path this call writes was established free, so
+ * removing it on failure cannot destroy somebody else's artifact.
+ *
+ * The bound on that claim, stated rather than papered over: the check and the move are two
+ * operations, so it holds against anything already on disk, not against a second installer racing
+ * this one. `ATOMIC_MOVE` cannot close the gap - on POSIX it is `rename(2)`, which replaces the
+ * target silently - and NIO exposes no create-exclusive move. Promotion therefore uses a plain
+ * non-replacing move, so a racing installer collides with `FileAlreadyExistsException` and this
+ * call reverts, rather than the two silently overwriting each other. Serialising installs is the
+ * only thing that would make the race impossible, and this function is not where that belongs:
+ * both callers run on a single wizard install path today.
  *
  * [install] is the loader call, injected so the decision and the cleanup are testable without a
  * DynamicPluginManager.
@@ -827,6 +886,13 @@ internal suspend fun stageAndInstall(
     val destination = SignedArtifact(finalFile)
     val movingIntoPlace = downloadedFile.absolutePath != finalFile.absolutePath
 
+    // The whole footprint, not just the jar: a stale `.sig` left beside a jar that was removed
+    // by hand is still somebody else's file, and promoting an unsigned download next to it would
+    // leave an old signature asserting bytes it never vetted - which PluginSignatureSidecar's own
+    // contract calls out as the thing never to do. Refusing also means every path this call is
+    // about to write was established free, which is what makes the cleanup below precise.
+    val occupied = if (movingIntoPlace) destination.firstOccupiedPath() else null
+
     // Both refusals in one place, and both decided before a byte moves: a refusal that arrives
     // after the move cannot be undone.
     val refusal =
@@ -836,9 +902,9 @@ internal suspend fun stageAndInstall(
                     "Restart BOSS, or remove it in the plugin manager, and try again."
             }
 
-            movingIntoPlace && finalFile.exists() -> {
-                "${finalFile.name} already exists, so $pluginId was not reinstalled over it. " +
-                    "Remove the existing plugin in the plugin manager and try again."
+            occupied != null -> {
+                "${occupied.name} already exists, so $pluginId was not reinstalled over it. " +
+                    "Remove the existing plugin in the plugin manager, or delete that file, and try again."
             }
 
             else -> {
@@ -851,29 +917,44 @@ internal suspend fun stageAndInstall(
         return Result.failure(IllegalStateException(refusal))
     }
 
-    if (movingIntoPlace) {
-        // Was delete-then-renameTo, which works on Windows but leaves a window in which neither
-        // file exists - a crash there loses a plugin jar.
-        staged.moveTo(destination)
-    }
-
+    // Inside the failure boundary, not before it. Promotion is two file moves and can fail
+    // halfway; when it does, moveTo has already put the destination back the way it found it and
+    // the download is cleared here, so the next attempt meets a free path rather than a refusal
+    // caused by the previous attempt's wreckage.
+    val promotion =
+        if (movingIntoPlace) {
+            // Was delete-then-renameTo, which works on Windows but leaves a window in which
+            // neither file exists - a crash there loses a plugin jar.
+            runCatching { staged.moveTo(destination) }
+        } else {
+            Result.success(Unit)
+        }
     val result =
-        try {
-            install(finalFile.absolutePath)
-        } catch (e: CancellationException) {
-            // Cancellation is not a failed install, and swallowing it would break structured
-            // concurrency. Clear what this call put there, then let it propagate.
-            destination.delete()
-            throw e
-        } catch (
-            @Suppress("TooGenericExceptionCaught") e: Exception,
-        ) {
-            // Deliberately broad: the loader is injected and a plugin's own code runs inside it, so
-            // what it can throw is not knowable here. Without this the exception escaped past the
-            // cleanup and left an unloadable jar at the installed path.
-            Result.failure(e)
+        if (promotion.isFailure) {
+            // The loader is never called: there is nothing whole at the destination to load.
+            staged.delete()
+            Result.failure(promotion.exceptionOrNull() ?: IOException("could not promote $pluginId"))
+        } else {
+            try {
+                install(finalFile.absolutePath)
+            } catch (e: CancellationException) {
+                // Cancellation is not a failed install, and swallowing it would break structured
+                // concurrency. Clear what this call put there, then let it propagate.
+                destination.delete()
+                throw e
+            } catch (
+                @Suppress("TooGenericExceptionCaught") e: Exception,
+            ) {
+                // Deliberately broad: the loader is injected and a plugin's own code runs inside
+                // it, so what it can throw is not knowable here. Without this the exception
+                // escaped past the cleanup and left an unloadable jar at the installed path.
+                Result.failure(e)
+            }
         }
 
+    // Every path this touches was established free above and written only by this call, so the
+    // cleanup cannot take an artifact that belongs to somebody else. After a failed promotion it
+    // is a no-op - moveTo has already put the destination back.
     if (result.isFailure) destination.delete()
     return result
 }

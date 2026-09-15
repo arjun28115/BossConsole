@@ -28,6 +28,10 @@ import kotlin.test.assertTrue
  * of those could lose the artifact the rollback existed to protect. Refusing has no such tail, and
  * it makes the cleanup unambiguous: everything at the destination afterwards belongs to this call.
  *
+ * That last part only holds if the refusal covers the artifact's whole footprint and promotion is
+ * all-or-nothing, which is what the partial-promotion cases below exist to pin. Promotion is two
+ * file moves; refusing an occupied jar does not make two moves indivisible.
+ *
  * Real files and real moves throughout, because the bug was never in the decision alone.
  */
 class WizardStagedInstallTest {
@@ -93,6 +97,121 @@ class WizardStagedInstallTest {
             assertEquals("the installed bytes", installed.readText(), "byte for byte, untouched")
             assertFalse(loaderReached, "nothing should be loaded when the destination is occupied")
             assertFalse(staged.exists(), "the download is ours, so it is cleaned up")
+        }
+    }
+
+    @Test
+    fun `a blocked destination sidecar leaves nothing behind and the retry succeeds`() {
+        runBlocking {
+            // The exact obstruction from review: the final `.sig` path is a nonempty directory, so
+            // the sidecar cannot be moved onto it. Verified against the filesystem rather than
+            // simulated - Files.move onto a nonempty directory throws FileSystemException.
+            val installed = File(dir, "demo-1.0.0.jar")
+            val obstruction = File(installed.absolutePath + ".sig")
+            obstruction.mkdirs()
+            File(obstruction, "occupant").writeText("someone else's file")
+            val staged = file("demo-1.0.0.jar.downloading.1", "the new bytes")
+            sidecarOf(staged).writeText("the new signature")
+            var loaderReached = false
+
+            val result =
+                stageAndInstall(
+                    downloadedFile = staged,
+                    finalFile = installed,
+                    pluginId = "demo",
+                    isResident = { false },
+                ) {
+                    loaderReached = true
+                    loaded("demo")
+                }
+
+            assertTrue(result.isFailure)
+            assertFalse(loaderReached, "a half-promoted artifact must never reach the loader")
+            assertFalse(installed.exists(), "no jar may be left at the scannable installed name")
+            assertTrue(obstruction.isDirectory, "the obstruction is not ours to remove")
+            assertEquals(
+                "someone else's file",
+                File(obstruction, "occupant").readText(),
+                "nothing inside it is ours to touch either",
+            )
+
+            // And the wreckage of the first attempt does not block the second.
+            obstruction.deleteRecursively()
+            val retryJar = file("demo-1.0.0.jar.downloading.2", "the new bytes")
+            sidecarOf(retryJar).writeText("the new signature")
+
+            val retry =
+                stageAndInstall(
+                    downloadedFile = retryJar,
+                    finalFile = installed,
+                    pluginId = "demo",
+                    isResident = { false },
+                ) { loaded("demo") }
+
+            assertTrue(retry.isSuccess, "the retry must not be refused by the first attempt's mess")
+            assertEquals("the new bytes", installed.readText())
+            assertEquals("the new signature", sidecarOf(installed).readText())
+        }
+    }
+
+    @Test
+    fun `a promotion onto an occupied path fails rather than replacing it`() {
+        // The occupied-path check and the move are two operations, so the check alone cannot make
+        // promotion exclusive against a second installer. This pins the half that is enforceable:
+        // the move itself refuses. `atomicMoveFrom` would not - ATOMIC_MOVE is rename(2) on POSIX
+        // and replaces the target silently, which is why promotion does not use it.
+        val staged = file("demo-1.0.0.jar.downloading.1", "the new bytes")
+        val occupiedByAnotherInstaller = file("demo-1.0.0.jar", "bytes from the other installer")
+
+        val thrown =
+            runCatching {
+                SignedArtifact(staged).moveTo(SignedArtifact(occupiedByAnotherInstaller))
+            }.exceptionOrNull()
+
+        assertTrue(thrown is java.nio.file.FileAlreadyExistsException, "got ${thrown?.let { it::class }}")
+        assertEquals(
+            "bytes from the other installer",
+            occupiedByAnotherInstaller.readText(),
+            "a promotion must never silently replace bytes it did not establish were absent",
+        )
+    }
+
+    @Test
+    fun `an unsigned download is refused rather than promoted beside an old signature`() {
+        runBlocking {
+            // A jar removed by hand can leave its sidecar behind. Promoting an unsigned download
+            // next to it would leave that signature asserting bytes it never vetted, which is the
+            // one thing PluginSignatureSidecar's own contract says never to do - and it is worse
+            // than no signature, because the loader would treat it as present and invalid.
+            val installed = File(dir, "demo-1.0.0.jar")
+            val stale = sidecarOf(installed).apply { writeText("a signature for bytes long gone") }
+            val staged = file("demo-1.0.0.jar.downloading.1", "unsigned new bytes")
+            var loaderReached = false
+
+            val result =
+                stageAndInstall(
+                    downloadedFile = staged,
+                    finalFile = installed,
+                    pluginId = "demo",
+                    isResident = { false },
+                ) {
+                    loaderReached = true
+                    loaded("demo")
+                }
+
+            assertTrue(result.isFailure)
+            assertFalse(loaderReached)
+            assertFalse(installed.exists(), "the jar must not be promoted next to a foreign sidecar")
+            assertEquals(
+                "a signature for bytes long gone",
+                stale.readText(),
+                "a pre-existing sidecar is not ours to delete either",
+            )
+            assertContains(
+                result.exceptionOrNull()?.message.orEmpty(),
+                stale.name,
+                "the refusal has to name the file the user must remove",
+            )
         }
     }
 
