@@ -3,6 +3,8 @@ package ai.rever.boss.plugin.loader
 import ai.rever.boss.plugin.logging.BossLogger
 import ai.rever.boss.plugin.logging.LogCategory
 import java.io.DataInputStream
+import java.io.IOException
+import java.util.jar.JarEntry
 import java.util.jar.JarFile
 
 /**
@@ -21,6 +23,15 @@ import java.util.jar.JarFile
 object BinaryCompatibilityValidator {
     /** Classes the host has a contract with; everything else in a plugin JAR is its own runtime. */
     private const val OWN_CLASS_PREFIX = "ai.rever.boss.plugin."
+
+    /**
+     * The most bytes one of the plugin's own class files may inflate to before it is refused.
+     *
+     * Generously above any real class file and far below a heap. The value, and the idea of
+     * capping each class before anything loads it, are from BossConsole#1293.
+     */
+    internal const val MAX_CLASS_BYTES: Int = 8 * 1024 * 1024
+
     private val logger = BossLogger.forComponent("BinaryCompatibilityValidator")
 
     data class ValidationResult(
@@ -85,40 +96,7 @@ object BinaryCompatibilityValidator {
                         // third-party classes here mirrors the member-ref scoping below.
                         if (!className.startsWith(OWN_CLASS_PREFIX)) continue
 
-                        // First, ensure the class itself can be loaded
-                        try {
-                            Class.forName(className, false, classLoader)
-                        } catch (e: LinkageError) {
-                            errors.add("$className: ${e.javaClass.simpleName} - ${e.message}")
-                            continue
-                        } catch (e: ClassNotFoundException) {
-                            errors.add("$className: ClassNotFoundException - ${e.message}")
-                            continue
-                        }
-
-                        // Read and parse constant pool, and verify all symbolic references
-                        try {
-                            val bytes = jar.getInputStream(entry).use { it.readBytes() }
-                            for (ref in ConstantPoolParser.extractReferences(bytes)) {
-                                // Skip references to classes within the same JAR — they were
-                                // compiled together and are guaranteed to be consistent.
-                                if (ref.ownerClassName in jarClassNames) continue
-                                verifyReference(ref, classLoader, className, errors)
-                            }
-                        } catch (e: Exception) {
-                            // Unreadable or malformed class file — not a compatibility issue
-                            // per se, skip. Reading moved inside this clause deliberately: a
-                            // class this cannot read is exactly as informative as one it cannot
-                            // parse, and neither is grounds to refuse the whole plugin.
-                            logger.debug(
-                                LogCategory.SYSTEM,
-                                "Failed to read or parse constant pool",
-                                mapOf(
-                                    "className" to className,
-                                    "error" to (e.message ?: "unknown"),
-                                ),
-                            )
-                        }
+                        errors += validateOwnClass(jar, entry, className, classLoader, jarClassNames)
                     }
                     classEntries.size
                 }
@@ -166,6 +144,105 @@ object BinaryCompatibilityValidator {
             errors = errors,
         )
     }
+
+    /**
+     * Validate one of the plugin's own classes, returning what is wrong with it.
+     *
+     * The bytes are read first, and bounded, because the plugin's own class loader reads the
+     * whole entry inside [Class.forName] to define the class. A cap applied after loading is too
+     * late: zeros deflate about 1000:1, so a 573 KiB JAR carried a 576 MiB class and ran a 512 MiB
+     * heap out of memory inside `forName`, before this function's own read was reached. Reading
+     * one class at a time bounds the total; this bounds each one.
+     *
+     * An entry this cannot read is not yet grounds to refuse - the loader still gets its say, and
+     * a class it can load but this cannot read is skipped, as before.
+     */
+    private fun validateOwnClass(
+        jar: JarFile,
+        entry: JarEntry,
+        className: String,
+        classLoader: ClassLoader,
+        jarClassNames: Set<String>,
+    ): List<String> {
+        val bytes = readBoundedOrNull(jar, entry, className)
+        val refusal =
+            if (bytes != null && bytes.size > MAX_CLASS_BYTES) {
+                "$className: class file is larger than $MAX_CLASS_BYTES bytes"
+            } else {
+                loadFailure(className, classLoader)
+            }
+        return when {
+            refusal != null -> listOf(refusal)
+            bytes == null -> emptyList()
+            else -> referenceErrors(bytes, className, classLoader, jarClassNames)
+        }
+    }
+
+    /** Parse [bytes]' constant pool and verify every symbolic reference it holds. */
+    private fun referenceErrors(
+        bytes: ByteArray,
+        className: String,
+        classLoader: ClassLoader,
+        jarClassNames: Set<String>,
+    ): List<String> {
+        val errors = mutableListOf<String>()
+        try {
+            for (ref in ConstantPoolParser.extractReferences(bytes)) {
+                // Skip references to classes within the same JAR - they were
+                // compiled together and are guaranteed to be consistent.
+                if (ref.ownerClassName in jarClassNames) continue
+                verifyReference(ref, classLoader, className, errors)
+            }
+        } catch (e: Exception) {
+            // Malformed class file - not a compatibility issue per se, skip.
+            logger.debug(
+                LogCategory.SYSTEM,
+                "Failed to parse constant pool",
+                mapOf("className" to className, "error" to (e.message ?: "unknown")),
+            )
+        }
+        return errors
+    }
+
+    /**
+     * Up to [MAX_CLASS_BYTES] + 1 bytes of [entry], or null when it cannot be read at all. One
+     * byte past the cap is enough to know the cap was passed, and never more than that is held.
+     */
+    private fun readBoundedOrNull(
+        jar: JarFile,
+        entry: JarEntry,
+        className: String,
+    ): ByteArray? {
+        val failure =
+            try {
+                return jar.getInputStream(entry).use { it.readNBytes(MAX_CLASS_BYTES + 1) }
+            } catch (e: IOException) {
+                e
+            } catch (e: SecurityException) {
+                // A signed JAR whose entry does not match its digest.
+                e
+            }
+        logger.debug(
+            LogCategory.SYSTEM,
+            "Failed to read class file",
+            mapOf("className" to className, "error" to (failure.message ?: "unknown")),
+        )
+        return null
+    }
+
+    /** Why [className] cannot be loaded, or null when it can. */
+    private fun loadFailure(
+        className: String,
+        classLoader: ClassLoader,
+    ): String? =
+        try {
+            Class.forName(className, false, classLoader)
+            null
+        } catch (e: LinkageError) {
+            "$className: ${e.javaClass.simpleName} - ${e.message}"
+        } catch (e: ClassNotFoundException) {
+            "$className: ClassNotFoundException - ${e.message}"
+        }
 
     private fun verifyReference(
         ref: ConstantPoolParser.MemberRef,
