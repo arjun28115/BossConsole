@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert"
+import { assertEquals } from "@std/assert"
 import { OpenAPIHono } from "@hono/zod-openapi"
 import type { SupabaseClient } from "@supabase/supabase-js"
 import type { PluginStoreContext } from "../types/context.ts"
