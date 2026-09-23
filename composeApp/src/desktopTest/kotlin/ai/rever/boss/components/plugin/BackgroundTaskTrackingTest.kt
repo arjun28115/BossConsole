@@ -83,38 +83,32 @@ class BackgroundTaskTrackingTest {
      * task's handle, which is worse than the leak this PR fixes: `getRunningTasks` stops reporting
      * a live task and `cancelAll` stops cancelling it.
      *
-     * Two things are needed to make the two launches actually share a millisecond, and without the
-     * first of them this test silently stops testing anything. The first `launchTask` in a JVM
-     * loads the coroutine machinery and was measured at 11ms, so the pair straddled a millisecond
-     * boundary, minted different ids and passed against a key-only `remove`. Hence the warm-up, and
-     * then the spin to the start of a fresh millisecond so the pair has a full one to run in.
+     * The collision is forced through `taskIdOverride` rather than waited for. Two earlier versions
+     * of this test tried to produce it from the real clock and both passed against the key-only
+     * `remove` they existed to catch, because the two launches never landed in one millisecond: the
+     * first `launchTask` in a JVM costs about 11ms of class loading, and warming up on a shape that
+     * does not suspend still leaves `CompletableDeferred.await` cold for the first real launch. A
+     * test whose coverage depends on winning that race is a test that reports nothing on the runs
+     * it loses, which is the case here for the one assertion that cannot fail spuriously.
      *
-     * Even so the collision is not guaranteed, and the failure direction is the safe one: different
-     * ids means the first task's handler evicts its own entry and the second survives, which is
-     * what this asserts. So the test cannot flake, it can only stop covering the case.
-     *
-     * The overwrite at `put` time is untouched here and belongs to #1478's unique ids.
+     * The overwrite at `put` time is untouched here and belongs to #1478's unique ids. This asserts
+     * the precondition rather than assuming it, so the shared key cannot quietly stop being shared.
      */
     @Test
     fun `a completing task does not evict a sibling sharing its id`() {
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         try {
-            val provider = DefaultBackgroundTaskProvider(scope)
-            // Warm up on the same shape the two below use, suspension included. A warm-up that
-            // does not suspend leaves `CompletableDeferred.await` cold, and paying that cost inside
-            // the first real launch is enough on its own to straddle a millisecond boundary.
-            val warm = CompletableDeferred<Unit>()
-            provider.launchTask("warmup") { warm.await() }
-            warm.complete(Unit)
-
-            val tick = System.currentTimeMillis()
-            while (System.currentTimeMillis() == tick) Thread.onSpinWait()
-
+            val provider = DefaultBackgroundTaskProvider(scope) { "$it-fixed" }
             val first = CompletableDeferred<Unit>()
             val second = CompletableDeferred<Unit>()
 
             provider.launchTask("sync") { first.await() }
             provider.launchTask("sync") { second.await() }
+            assertEquals(
+                1,
+                provider.trackedTaskCount(),
+                "both launches must share one key, or this test covers nothing",
+            )
 
             // Finish only the first. The second is still running, so its handle must survive.
             first.complete(Unit)
@@ -124,6 +118,13 @@ class BackgroundTaskTrackingTest {
                 provider.trackedTaskCount(),
                 "a task that finished must not take a still-running task's handle with it",
             )
+            // The consequence a caller actually meets: a live task the host can still see and stop.
+            assertEquals(
+                1,
+                provider.getRunningTasks().size,
+                "the still-running task must remain reachable through the interface",
+            )
+
             second.complete(Unit)
         } finally {
             scope.cancel()
