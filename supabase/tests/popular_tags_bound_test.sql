@@ -71,7 +71,11 @@ select is((select count(*)::int from public.get_popular_tags(7)), 7,
 -- than new mutation coverage: the out-of-band cases above already fail if either bound moves
 -- inward, because they assert exact counts. LEAST(..., 99) turns 101 and 1000000000 into 99
 -- against an expected 100, and GREATEST(..., 2) turns 0 and -1 into 2 against an expected 1.
--- 100 and 1 are the values a reader looks for, so they are worth asserting on their own.
+-- 100 and 1 are the values a reader looks for, so they are worth asserting on their own. The
+-- cap one repeats the fixture guard above exactly: SECURITY DEFINER runs the body as the owner
+-- whichever role calls it, so the same argument gives the same answer under anon. It is kept
+-- beside the floor assertion, where the pair reads as the band, rather than left implied by a
+-- guard whose job is to prove the fixture.
 select is((select count(*)::int from public.get_popular_tags(100)), 100,
     'the cap itself passes through unchanged');
 select is((select count(*)::int from public.get_popular_tags(1)), 1,
