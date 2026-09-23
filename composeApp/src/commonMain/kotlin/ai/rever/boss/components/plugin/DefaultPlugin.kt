@@ -2180,7 +2180,7 @@ private class DefaultCacheProvider : CacheProvider {
  * Default implementation of BackgroundTaskProvider.
  * Launches tasks on the plugin scope with tracking.
  */
-private class DefaultBackgroundTaskProvider(
+internal class DefaultBackgroundTaskProvider(
     private val scope: kotlinx.coroutines.CoroutineScope,
 ) : BackgroundTaskProvider {
     private val taskLogger = BossLogger.forComponent("DefaultBackgroundTaskProvider")
@@ -2192,21 +2192,30 @@ private class DefaultBackgroundTaskProvider(
     ): BackgroundTaskHandle? =
         try {
             val taskId = "$name-${System.currentTimeMillis()}"
-            val job =
-                scope.launch {
-                    try {
-                        task()
-                    } finally {
-                        activeTasks.remove(taskId)
-                    }
-                }
+            val job = scope.launch { task() }
             val handle = DefaultBackgroundTaskHandle(name, job)
+            // Register first, release second. The release used to be a `finally` inside the
+            // coroutine, which runs before this line whenever the body reaches its end before the
+            // launching thread gets here - then the removal finds nothing and the entry that lands
+            // afterwards is never released. `invokeOnCompletion` cannot lose that race: registered
+            // after the entry exists, and invoked immediately when the job is already complete.
             activeTasks[taskId] = handle
+            job.invokeOnCompletion { activeTasks.remove(taskId) }
             handle
         } catch (e: Exception) {
             taskLogger.warn(LogCategory.SYSTEM, "Failed to launch background task", mapOf("task" to name), error = e)
             null
         }
+
+    /**
+     * How many handles are still tracked, including any the provider failed to release.
+     *
+     * Visible for tests. A handle that outlives its task is invisible through this interface:
+     * [getRunningTasks] filters it out because it is no longer active, and [cancelAll] does not
+     * count it for the same reason, so the only symptom is a map that grows for the lifetime of
+     * the window. This is the seam that makes that growth assertable.
+     */
+    internal fun trackedTaskCount(): Int = activeTasks.size
 
     override fun getRunningTasks(): List<BackgroundTaskHandle> = activeTasks.values.filter { it.isActive }.toList()
 
