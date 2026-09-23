@@ -2200,7 +2200,13 @@ internal class DefaultBackgroundTaskProvider(
             // afterwards is never released. `invokeOnCompletion` cannot lose that race: registered
             // after the entry exists, and invoked immediately when the job is already complete.
             activeTasks[taskId] = handle
-            job.invokeOnCompletion { activeTasks.remove(taskId) }
+            // Value-matched, so a completing task can only ever evict its OWN handle. `taskId` is
+            // `name` plus the millisecond, so two same-named tasks launched inside one millisecond
+            // share a key; a key-only remove would then let the first to finish drop the second,
+            // still-running task out of `getRunningTasks` and out of `cancelAll`. That inverts the
+            // defect being fixed here, from retaining a dead handle to losing a live one.
+            // `DefaultBackgroundTaskHandle` overrides no `equals`, so this is an identity match.
+            job.invokeOnCompletion { activeTasks.remove(taskId, handle) }
             handle
         } catch (e: Exception) {
             taskLogger.warn(LogCategory.SYSTEM, "Failed to launch background task", mapOf("task" to name), error = e)
