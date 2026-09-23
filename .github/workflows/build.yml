@@ -396,11 +396,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: [boss-ai-tests]
     if: ${{ !cancelled() }}
-    # Naming any permission drops every unnamed one, so `contents` is restated here for checkout.
-    # `packages` is what the ghcr.io sign-in below needs.
-    permissions:
-      contents: read
-      packages: read
+    env:
+      # `supabase/setup-cli` points the CLI at ghcr.io, and every `supabase` command below pulls
+      # the Postgres image through it. While the shared runner pool is busy, ghcr.io refuses that
+      # pull with `toomanyrequests` and the job dies before a single assertion runs, on every open
+      # PR at once. ECR Public carries the same image and is a separate limit, so the pull stops
+      # depending on how busy GitHub's registry is at that moment.
+      #
+      # Authenticating to ghcr.io does NOT fix this, which was measured rather than assumed: with
+      # `docker/login-action` reporting `Login Succeeded!`, the very next pull failed with the same
+      # `toomanyrequests`. The limit is not the anonymous one.
+      SUPABASE_INTERNAL_IMAGE_REGISTRY: public.ecr.aws
 
     steps:
       - name: Require BOSS AI contract checks
@@ -416,19 +422,6 @@ jobs:
           # API from shared runners and intermittently fails with "rate limit exceeded".
           # Pinning skips that lookup. Bump as needed.
           version: 2.109.0
-
-      # `supabase db start` pulls ghcr.io/supabase/postgres through the local Docker daemon.
-      # Unauthenticated, that pull is rate limited, and when the shared runner pool is busy it
-      # fails with `toomanyrequests` before a single test has run. Same class of failure the CLI
-      # pin above already avoids, one layer down: there the unauthenticated GitHub API, here the
-      # unauthenticated registry. GITHUB_TOKEN is present even on pull requests from forks, so
-      # outside contributors get the authenticated pull too.
-      - name: 🔑 Sign in to ghcr.io before pulling the Postgres image
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 🚀 Start local Postgres (applies migrations)
         run: supabase db start
