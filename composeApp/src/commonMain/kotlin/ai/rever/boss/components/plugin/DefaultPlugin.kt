@@ -2185,11 +2185,11 @@ internal class DefaultBackgroundTaskProvider(
     /**
      * Test seam: mints the `activeTasks` key, so a test can force two launches onto one key.
      *
-     * Production passes nothing. The collision this exists to reproduce is real but not
-     * reproducible on demand, because it needs two launches inside one clock millisecond, and a
-     * test that waits for that covers the case only sometimes and says nothing when it does not.
-     * Two earlier versions of the sibling test below passed against the very mutation they were
-     * written to catch, for exactly that reason.
+     * Production passes nothing. The behaviour under a shared key has to be assertable whether or
+     * not the id scheme of the day can still produce one: waiting for a natural collision covers
+     * the case only sometimes, and reports the runs it missed exactly like the runs it caught. Two
+     * earlier versions of the sibling test below passed against the very mutation they were written
+     * to catch, for that reason.
      */
     private val taskIdOverride: ((String) -> String)? = null,
 ) : BackgroundTaskProvider {
@@ -2210,11 +2210,12 @@ internal class DefaultBackgroundTaskProvider(
             // afterwards is never released. `invokeOnCompletion` cannot lose that race: registered
             // after the entry exists, and invoked immediately when the job is already complete.
             activeTasks[taskId] = handle
-            // Value-matched, so a completing task can only ever evict its OWN handle. `taskId` is
-            // `name` plus the millisecond, so two same-named tasks launched inside one millisecond
-            // share a key; a key-only remove would then let the first to finish drop the second,
-            // still-running task out of `getRunningTasks` and out of `cancelAll`. That inverts the
-            // defect being fixed here, from retaining a dead handle to losing a live one.
+            // Value-matched, so a completing task can only ever evict its OWN handle. Whether two
+            // launches can share a key is decided by the id expression above, and this line
+            // deliberately does not depend on that answer: wherever keys can collide, a key-only
+            // remove lets the first task to finish drop a second, still-running task out of
+            // `getRunningTasks` and out of `cancelAll`, inverting the defect being fixed here from
+            // retaining a dead handle to losing a live one.
             // `DefaultBackgroundTaskHandle` overrides no `equals`, so this is an identity match.
             job.invokeOnCompletion { activeTasks.remove(taskId, handle) }
             handle
