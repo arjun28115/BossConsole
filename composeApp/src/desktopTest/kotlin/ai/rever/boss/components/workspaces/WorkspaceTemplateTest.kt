@@ -159,7 +159,14 @@ class WorkspaceTemplateTest {
         val optional = PredefinedWorkspaces.allWorkspaces.filter { it.projectIsOptional() }.map { it.id }
 
         assertEquals(
-            setOf(PredefinedWorkspaces.TERMINAL_BROWSER_ID, PredefinedWorkspaces.DUAL_TERMINAL_ID),
+            setOf(
+                PredefinedWorkspaces.TERMINAL_BROWSER_ID,
+                PredefinedWorkspaces.DUAL_TERMINAL_ID,
+                // Four plain shells, `cd {projectPath}` and nothing else: the same shape as the two
+                // above, so it stands without a project by #1592's rule. It shipped after that rule
+                // did (#1143), and this pin is what asks the question for each new built-in.
+                PredefinedWorkspaces.DEVOPS_INFRA_ID,
+            ),
             optional.toSet(),
         )
     }
