@@ -4,14 +4,22 @@ import ai.rever.boss.ipc.auth.IpcCall
 import ai.rever.boss.ipc.auth.IpcEnvironment
 import ai.rever.boss.ipc.proto.services.CreateSessionRequest
 import ai.rever.boss.ipc.proto.services.TerminalOutputChunk
+import com.google.protobuf.Any
 import com.google.protobuf.ByteString
+import com.google.protobuf.Duration
+import com.google.rpc.RetryInfo
 import io.grpc.Status
+import io.grpc.StatusRuntimeException
+import io.grpc.protobuf.StatusProto
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.IOException
 import java.io.OutputStream
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.locks.ReentrantLock
 
 @Suppress("LongParameterList") // Owner identity stays immutable alongside the process and terminal dimensions.
 internal class TerminalSession(
@@ -23,10 +31,15 @@ internal class TerminalSession(
     @Volatile var rows: Int,
     val ownerInstance: String = "",
     private val inputWriteTimeoutMillis: Long = 5_000,
+    private val inputQueueTimeoutMillis: Long = INPUT_QUEUE_TIMEOUT_MILLIS,
 ) {
     val createdAt = System.currentTimeMillis()
     val output = TerminalOutputBuffer()
-    private val inputLock = ReentrantLock()
+
+    // Queued writers suspend on the mutex instead of parking a Dispatchers.IO
+    // thread, so a stalled pipe cannot pin the pool, and a cancelled caller
+    // abandons its queued write instead of sending it after the caller gave up.
+    private val inputMutex = Mutex()
 
     // Set once a stdin write fails or stalls; later sends fail fast on a closed pipe.
     @Volatile private var inputClosed = false
@@ -89,16 +102,35 @@ internal class TerminalSession(
         }, "terminal-output-$id").apply { isDaemon = true }.start()
     }
 
-    fun send(bytes: ByteArray) {
-        if (!inputLock.tryLock()) {
-            throw Status.RESOURCE_EXHAUSTED.withDescription("Terminal input is busy").asRuntimeException()
+    suspend fun send(bytes: ByteArray) {
+        // Queue on the mutex up to the bound. Failing instantly turns every concurrent
+        // caller into a retrying spin exactly when the pipe is busiest; callers that
+        // outwait the bound are shed with a retry-after instead.
+        val ticket = kotlin.Any()
+        if (!acquireInputLock(ticket)) {
+            throw inputBusy()
         }
         try {
+            currentCoroutineContext().ensureActive()
             requireUsableInput()
             writeInput(bytes)
         } finally {
-            inputLock.unlock()
+            inputMutex.unlock(ticket)
         }
+    }
+
+    private suspend fun acquireInputLock(ticket: kotlin.Any): Boolean {
+        val acquired =
+            withTimeoutOrNull(inputQueueTimeoutMillis) {
+                inputMutex.lock(ticket)
+                true
+            } == true
+        if (!acquired && inputMutex.holdsLock(ticket)) {
+            // The grant can still land on a waiter the timeout already shed; hand
+            // it back instead of leaving the queue locked behind a dead caller.
+            inputMutex.unlock(ticket)
+        }
+        return acquired
     }
 
     private fun requireUsableInput() {
@@ -109,6 +141,26 @@ internal class TerminalSession(
             throw Status.FAILED_PRECONDITION.withDescription("Terminal input pipe is closed").asRuntimeException()
         }
     }
+
+    private fun inputBusy(): StatusRuntimeException =
+        StatusProto.toStatusRuntimeException(
+            com.google.rpc.Status
+                .newBuilder()
+                .setCode(Status.Code.RESOURCE_EXHAUSTED.value())
+                .setMessage("Terminal input is busy")
+                .addDetails(
+                    Any.pack(
+                        RetryInfo
+                            .newBuilder()
+                            .setRetryDelay(
+                                Duration
+                                    .newBuilder()
+                                    .setSeconds(inputQueueTimeoutMillis / 1_000)
+                                    .setNanos(((inputQueueTimeoutMillis % 1_000) * 1_000_000).toInt()),
+                            ).build(),
+                    ),
+                ).build(),
+        )
 
     private fun writeInput(bytes: ByteArray) {
         val output = process.outputStream
@@ -175,6 +227,8 @@ internal class TerminalSession(
             .build()
 
     companion object {
+        private const val INPUT_QUEUE_TIMEOUT_MILLIS = 5_000L
+
         private fun validateLaunchInput(request: CreateSessionRequest) {
             // Validate before ProcessBuilder: native environment validation differs between OS/JDK implementations.
             require(request.commandList.firstOrNull()?.isNotEmpty() != false)

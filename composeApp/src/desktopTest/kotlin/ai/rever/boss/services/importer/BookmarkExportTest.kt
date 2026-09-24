@@ -1,13 +1,17 @@
 package ai.rever.boss.services.importer
 
 import ai.rever.boss.plugin.bookmark.Bookmark
+import ai.rever.boss.plugin.bookmark.BookmarkCollection
 import ai.rever.boss.plugin.workspace.TabConfig
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.util.concurrent.Executors
+import javax.swing.SwingUtilities
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -98,6 +102,27 @@ class BookmarkExportTest {
         }
 
     @Test
+    fun `the message counts only the collections the bookmarks came from`() =
+        runTest {
+            val onlyTerminal =
+                collectionOf(
+                    "Shells",
+                    Bookmark(id = "t2", tabConfig = TabConfig(type = "terminal", title = "Shell"), workspaceName = ""),
+                )
+            val result =
+                BookmarkExport.export(
+                    listOf(collectionOf("Empty"), onlyTerminal, work),
+                    chooseFile = { "/exports/bookmarks.html" },
+                    writeFile = { _, _ -> },
+                )
+
+            assertEquals(
+                "Exported 2 bookmarks from 1 collection to bookmarks.html, leaving out 2 that aren't web pages.",
+                result.message(),
+            )
+        }
+
+    @Test
     fun `a write the disk refuses is reported with its reason`() =
         runTest {
             val result =
@@ -128,27 +153,59 @@ class BookmarkExportTest {
         }
 
     @Test
-    fun `the save dialog and the write run on the IO dispatcher, not the caller's thread`() =
+    fun `the file is built, asked for and written on the IO dispatcher, not the caller's thread`() =
         runTest {
             // pickSaveFile wraps its dialog in SwingUtilities.invokeAndWait, which throws
             // java.lang.Error when called from the event thread the menu runs on.
             val executor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "export-io") }
-            val threads = mutableListOf<String>()
+            val steps = mutableListOf<String>()
+            // The writer reads the collections while it builds the file, so this records where that ran.
+            val collections =
+                object : AbstractList<BookmarkCollection>() {
+                    override val size = 1
+
+                    override fun get(index: Int): BookmarkCollection {
+                        steps.add("build on ${Thread.currentThread().name}")
+                        return work
+                    }
+                }
             try {
                 BookmarkExport.export(
-                    listOf(work),
+                    collections,
                     chooseFile = {
-                        threads.add(Thread.currentThread().name)
+                        steps.add("dialog on ${Thread.currentThread().name}")
                         "/exports/bookmarks.html"
                     },
-                    writeFile = { _, _ -> threads.add(Thread.currentThread().name) },
+                    writeFile = { _, _ -> steps.add("write on ${Thread.currentThread().name}") },
                     io = executor.asCoroutineDispatcher(),
                 )
             } finally {
                 executor.shutdownNow()
             }
 
-            assertEquals(listOf("export-io", "export-io"), threads)
+            assertEquals(listOf("build on export-io", "dialog on export-io", "write on export-io"), steps.distinct())
+        }
+
+    @Test
+    fun `run from the event thread, the save dialog can still wait on it`() =
+        runTest {
+            // What runFromMenu does, with export's own default dispatcher: the menu runs on the
+            // event thread, and invokeAndWait from there throws java.lang.Error.
+            val written = mutableListOf<String>()
+            val result =
+                withContext(Dispatchers.Main) {
+                    BookmarkExport.export(
+                        listOf(work),
+                        chooseFile = {
+                            SwingUtilities.invokeAndWait {}
+                            "/exports/bookmarks.html"
+                        },
+                        writeFile = { path, _ -> written.add(path) },
+                    )
+                }
+
+            assertIs<BookmarkExportResult.Exported>(result)
+            assertEquals(listOf("/exports/bookmarks.html"), written)
         }
 
     @Test

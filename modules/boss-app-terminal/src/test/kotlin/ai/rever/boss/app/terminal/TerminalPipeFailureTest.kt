@@ -2,6 +2,7 @@ package ai.rever.boss.app.terminal
 
 import io.grpc.Status
 import io.grpc.StatusRuntimeException
+import kotlinx.coroutines.runBlocking
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -50,12 +51,12 @@ class TerminalPipeFailureTest {
             )
         try {
             val startedAt = System.nanoTime()
-            val failure = assertFailsWith<StatusRuntimeException> { session.send(ByteArray(8)) }
+            val failure = assertFailsWith<StatusRuntimeException> { runBlocking { session.send(ByteArray(8)) } }
             // The bounded write returns promptly instead of hanging on an unread pipe forever.
             assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt) < 5_000)
             assertEquals(Status.Code.ABORTED, failure.status.code)
             assertTrue(process.inputClosed.await(5, TimeUnit.SECONDS))
-            val retry = assertFailsWith<StatusRuntimeException> { session.send(ByteArray(8)) }
+            val retry = assertFailsWith<StatusRuntimeException> { runBlocking { session.send(ByteArray(8)) } }
             assertEquals(Status.Code.FAILED_PRECONDITION, retry.status.code)
         } finally {
             process.unblock.countDown()
@@ -67,7 +68,7 @@ class TerminalPipeFailureTest {
         val process = StalledInputProcess()
         process.exit.complete(process)
         val session = TerminalSession("fixture", "/fixture", listOf("fixture"), process, 80, 24)
-        val failure = assertFailsWith<StatusRuntimeException> { session.send(ByteArray(1)) }
+        val failure = assertFailsWith<StatusRuntimeException> { runBlocking { session.send(ByteArray(1)) } }
         assertEquals(Status.Code.FAILED_PRECONDITION, failure.status.code)
     }
 

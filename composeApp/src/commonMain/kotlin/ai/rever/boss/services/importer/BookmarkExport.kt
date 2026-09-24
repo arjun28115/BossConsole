@@ -67,9 +67,15 @@ object BookmarkExport {
     /**
      * Write [collections] to the file [chooseFile] names.
      *
-     * [chooseFile] and [writeFile] run on [io]. The desktop save dialog wraps itself in
-     * `SwingUtilities.invokeAndWait`, which throws `java.lang.Error` when called from the event
-     * thread the menu runs on, and an `Error` gets past the dialog's own `catch (e: Exception)`.
+     * Everything after the null check runs on [io]: building the file, [chooseFile] and
+     * [writeFile]. The desktop save dialog wraps itself in `SwingUtilities.invokeAndWait`, which
+     * throws `java.lang.Error` when called from the event thread the menu runs on, and an `Error`
+     * gets past the dialog's own `catch (e: Exception)`.
+     *
+     * The default [writeFile] is [atomicWriteText], so on a POSIX filesystem the export is
+     * readable by its owner only (0600), like every file that helper writes. That suits a file
+     * whose URLs can carry tokens, and it means other accounts on the machine, root aside, cannot
+     * read it until its owner changes that.
      *
      * @param collections null when the Bookmarks tool is not loaded
      * @param chooseFile the path to write, or null when the user cancelled
@@ -81,11 +87,11 @@ object BookmarkExport {
         io: CoroutineDispatcher = Dispatchers.IO,
     ): BookmarkExportResult {
         if (collections == null) return BookmarkExportResult.ToolUnavailable
-        val file = NetscapeBookmarkWriter.write(collections)
-        return if (file.bookmarks == 0) {
-            BookmarkExportResult.NothingToExport(file.skipped)
-        } else {
-            withContext(io) {
+        return withContext(io) {
+            val file = NetscapeBookmarkWriter.write(collections)
+            if (file.bookmarks == 0) {
+                BookmarkExportResult.NothingToExport(file.skipped)
+            } else {
                 chooseFile(SUGGESTED_FILE_NAME)?.let { path -> save(path, file, writeFile) }
                     ?: BookmarkExportResult.Cancelled
             }

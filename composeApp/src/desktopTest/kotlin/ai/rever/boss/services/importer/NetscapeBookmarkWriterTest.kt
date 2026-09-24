@@ -169,10 +169,26 @@ class NetscapeBookmarkWriterTest {
                 listOf(collectionOf("Empty"), collectionOf("Work", webBookmark("Docs", "https://docs.example.com/"))),
             )
 
-        assertEquals(2, file.collections)
         assertTrue(">Empty</H3>" in file.html, file.html)
         // The importer creates collections from bookmarks, so an empty folder does not come back.
         // Browsers keep it; this pins what BOSS itself does on re-import.
         assertEquals(listOf("Work"), NetscapeBookmarkParser.parse(file.html).map { it.folder })
+    }
+
+    @Test
+    fun `only collections a bookmark was written from are counted`() {
+        val terminal = Bookmark(id = "t", tabConfig = TabConfig(type = "terminal", title = "Shell"), workspaceName = "")
+        val file =
+            NetscapeBookmarkWriter.write(
+                listOf(
+                    collectionOf("Empty"),
+                    collectionOf("Shells", terminal),
+                    collectionOf("Work", webBookmark("Docs", "https://docs.example.com/")),
+                ),
+            )
+
+        // All three are written as folders; only Work gave the file a bookmark.
+        assertEquals(3, Regex("<H3 ").findAll(file.html).count())
+        assertEquals(1, file.collections)
     }
 }
