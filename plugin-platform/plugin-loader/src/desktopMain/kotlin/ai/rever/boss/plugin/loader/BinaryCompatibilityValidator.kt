@@ -54,6 +54,12 @@ object BinaryCompatibilityValidator {
     ): ValidationResult {
         val errors = mutableListOf<String>()
 
+        // The own class being validated when something threw, or null while the JAR was still
+        // being opened and enumerated. Only the null case is a failure to read the archive; a throw
+        // from inside the loop is a class load failing (a sealing violation, a signed-JAR digest
+        // mismatch) and is reported against that class, beside the per-class errors found so far.
+        var validating: String? = null
+
         // Names for every class, bytes for only the ones actually validated.
         //
         // Both were read together before, so the host held a JAR's entire uncompressed class
@@ -67,7 +73,7 @@ object BinaryCompatibilityValidator {
         // which returns isCompatible=false - and the caller refuses the load on that. Bytes for
         // those classes are now never read, so they cannot fail a plugin that does not depend on
         // them.
-        val validated =
+        val classCount =
             try {
                 JarFile(jarPath).use { jar ->
                     val classEntries =
@@ -96,26 +102,25 @@ object BinaryCompatibilityValidator {
                         // third-party classes here mirrors the member-ref scoping below.
                         if (!className.startsWith(OWN_CLASS_PREFIX)) continue
 
+                        validating = className
                         errors += validateOwnClass(jar, entry, className, classLoader, jarClassNames)
                     }
                     classEntries.size
                 }
             } catch (e: Exception) {
+                val failure =
+                    validating?.let { "$it: validation aborted - ${e.javaClass.simpleName}: ${e.message}" }
+                        ?: "Failed to read JAR: ${e.message}"
                 logger.error(
                     LogCategory.SYSTEM,
-                    "Failed to read JAR for validation",
+                    "JAR validation aborted",
                     mapOf(
                         "jarPath" to jarPath,
+                        "stage" to (validating ?: "opening the JAR"),
                         "error" to (e.message ?: "unknown"),
                     ),
                 )
-                return ValidationResult(
-                    isCompatible = false,
-                    errors =
-                        listOf(
-                            "Failed to read JAR: ${e.message}",
-                        ),
-                )
+                return ValidationResult(isCompatible = false, errors = errors + failure)
             }
 
         if (errors.isNotEmpty()) {
@@ -134,7 +139,7 @@ object BinaryCompatibilityValidator {
                 "Binary compatibility validation passed",
                 mapOf(
                     "jarPath" to jarPath,
-                    "classCount" to validated,
+                    "classCount" to classCount,
                 ),
             )
         }
@@ -169,6 +174,11 @@ object BinaryCompatibilityValidator {
             if (bytes != null && bytes.size > MAX_CLASS_BYTES) {
                 "$className: class file is larger than $MAX_CLASS_BYTES bytes"
             } else {
+                // When the bounded read failed (bytes == null), `forName` below reads the entry again
+                // with no bound. That cannot materialise more than the cap: an entry `readNBytes`
+                // cannot read fails inside `forName` at the same offset, before anything past it is
+                // inflated. Refusing here instead would break this function's own rule, stated in
+                // its KDoc: an entry this cannot read is not by itself grounds to refuse.
                 loadFailure(className, classLoader)
             }
         return when {
@@ -280,7 +290,7 @@ object BinaryCompatibilityValidator {
                             "error" to e.toString(),
                         ),
                     )
-                } else if (ref.ownerClassName.startsWith("ai.rever.boss.plugin.")) {
+                } else if (ref.ownerClassName.startsWith(OWN_CLASS_PREFIX)) {
                     errors.add("$sourceClass -> ${ref.ownerClassName}: class not found")
                 }
                 return
@@ -297,7 +307,7 @@ object BinaryCompatibilityValidator {
         // whole plugin — it degrades at the actual call site at runtime (handled
         // by the plugin's own error handling), if that path is ever hit. Class
         // resolution above is already scoped this way; mirror it for members.
-        if (!ref.ownerClassName.startsWith("ai.rever.boss.plugin.")) {
+        if (!ref.ownerClassName.startsWith(OWN_CLASS_PREFIX)) {
             return
         }
 
