@@ -6,6 +6,7 @@ import ai.rever.boss.components.plugin.panels.left_top.ProjectState
 import ai.rever.boss.dashboard.DashboardStatsManager
 import ai.rever.boss.dashboard.RecentBrowserPagesManager
 import ai.rever.boss.dashboard.RecentFilesManager
+import ai.rever.boss.mcp.McpToolRegistryImpl
 import ai.rever.boss.performance.PerformanceMonitor
 import ai.rever.boss.plugin.PluginStoreSetup
 import ai.rever.boss.plugin.browser.FluckEngine
@@ -56,6 +57,14 @@ object ShutdownSequence {
                     ProjectState.flushPendingSaves()
                     DashboardStatsManager.flushPendingSaves()
                 }
+            },
+            ShutdownStep("flushing MCP operation ledger on exit") {
+                // The ledger persists on a daemon writer thread fed by a bounded queue;
+                // record() returns after the enqueue, so Cmd+Q, SIGTERM and the restart
+                // paths would otherwise exit with audit records still queued. Bounded
+                // wait, and ordered before the logger step so a timeout warning still
+                // has a log to land in.
+                McpToolRegistryImpl.ledger.flush()
             },
             ShutdownStep("stopping performance monitor") {
                 PerformanceMonitor.stop()

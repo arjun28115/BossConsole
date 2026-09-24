@@ -836,6 +836,10 @@ internal class McpToolRegistryCore(
                 }
             throw cancelled
         } finally {
+            // NonCancellable because a cancelled invoke is still an event the audit journal
+            // must capture; Dispatchers.IO because invoke() is callable from any dispatcher
+            // (including Main), and record() still runs argument sanitization plus the queue
+            // hop on the caller - the disk work itself belongs to the writer thread.
             withContext(NonCancellable + Dispatchers.IO) {
                 ledger.record(
                     toolName = toolName,

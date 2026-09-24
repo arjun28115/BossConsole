@@ -558,11 +558,15 @@ private fun McpActivityStatusItem() {
     if (showActivityLog) {
         val totalCalls by McpToolRegistryImpl.ledger.totalCalls.collectAsState()
         val totalErrors by McpToolRegistryImpl.ledger.totalErrors.collectAsState()
+        val pendingWriteIds by McpToolRegistryImpl.ledger.pendingWriteIds.collectAsState()
+        val droppedWrites by McpToolRegistryImpl.ledger.droppedWrites.collectAsState()
         McpActivityLogDialog(
             operations = recentOps,
             totalCalls = totalCalls,
             totalErrors = totalErrors,
             ledgerPath = McpToolRegistryImpl.ledger.persistencePath,
+            pendingWriteIds = pendingWriteIds,
+            droppedWrites = droppedWrites,
             onDismiss = { showActivityLog = false },
         )
     }
