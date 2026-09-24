@@ -5,6 +5,7 @@ import ai.rever.boss.performance.PerformanceSettingsManager
 import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.run.RunnerSettingsManager
 import ai.rever.boss.terminal.TerminalLinkSettingsManager
+import ai.rever.boss.updater.UpdateSettingsFiles
 import ai.rever.boss.updater.UpdateSettingsManager
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assumptions
@@ -13,6 +14,7 @@ import java.nio.file.Files
 import java.nio.file.attribute.BasicFileAttributes
 import kotlin.test.Test
 import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
 
 /**
  * Each settings manager REPLACES its file on save rather than truncating and rewriting it (#1659).
@@ -29,8 +31,20 @@ import kotlin.test.assertNotEquals
  * truncated file. Windows exposes no identity through `fileKey()`, so the check is skipped there
  * and made on the POSIX legs, where the property is the same.
  *
- * Each save is made twice: once to be sure the file exists, since two of the managers load on a
- * background thread, then once to measure.
+ * Two things make that comparison exact rather than likely, and each was a real failure:
+ *
+ * - **The old inode is pinned with a hard link before the measured save.** An inode NUMBER is only
+ *   unique among live files. ext4 hands a just-freed number to the next file created in the
+ *   directory, so if anything replaces the file between the two reads, the measured save's temp
+ *   file can be given the first file's number back and a correct atomic replace compares equal.
+ *   The runner and terminal-link managers do exactly that: they load on a background thread and,
+ *   finding no file, write a default one under the save lock. That failed ubuntu CI once while
+ *   macOS, whose APFS does not recycle numbers like this, passed. While the link holds the old
+ *   inode, nothing can be given its number.
+ * - **The file is created before the manager is first touched, if it is absent.** Those two
+ *   background loads then read instead of writing, so no replace of the manager's own can land
+ *   between the reads. Without this a save reverted to `writeText` could still pass, because
+ *   the background write would change the identity for it.
  */
 class SettingsAtomicReplaceTest {
     private fun identity(file: File): Any? {
@@ -41,19 +55,39 @@ class SettingsAtomicReplaceTest {
     private fun assertReplacedOnSave(
         fileName: String,
         save: suspend () -> Unit,
+    ) = assertReplacedOnSave(BossDirectories.resolve(fileName), save)
+
+    private fun assertReplacedOnSave(
+        file: File,
+        save: suspend () -> Unit,
     ) = runBlocking {
-        val file = BossDirectories.resolve(fileName)
+        if (!file.exists()) {
+            file.parentFile?.mkdirs()
+            file.writeText("{}")
+        }
         save()
-        val before = identity(file)
-        Assumptions.assumeTrue(before != null, "this filesystem exposes no file identity; checked on POSIX instead")
+        assertTrue(file.exists(), "${file.name} was never written; the managers log a failed save and swallow it")
+        val exposesIdentity = identity(file) != null
+        Assumptions.assumeTrue(exposesIdentity, "this filesystem exposes no file identity; checked on POSIX instead")
 
-        save()
+        val pin = File(file.parentFile, "${file.name}.pin")
+        pin.delete()
+        Files.createLink(pin.toPath(), file.toPath())
+        try {
+            val before = identity(pin)
 
-        assertNotEquals(
-            before,
-            identity(file),
-            "$fileName must be replaced by an atomic rename, not truncated and rewritten in place",
-        )
+            save()
+
+            val after = identity(file)
+            assertNotEquals(
+                before,
+                after,
+                "${file.name} must be replaced by an atomic rename, not truncated and rewritten in place " +
+                    "(identity before $before, after $after)",
+            )
+        } finally {
+            pin.delete()
+        }
     }
 
     @Test
@@ -75,8 +109,10 @@ class SettingsAtomicReplaceTest {
     /**
      * Not one of the four #1659 names, but the same hazard: its load reads outside the write lock,
      * and what a torn read resets is the user's own choices (auto-check, the dismissed version).
+     * Resolved through [UpdateSettingsFiles.settingsFile], the manager's own path, since other tests
+     * point that at a file of their own.
      */
     @Test
     fun `update settings are replaced on save, never rewritten in place`() =
-        assertReplacedOnSave("update-settings.json") { UpdateSettingsManager.saveSettings() }
+        assertReplacedOnSave(UpdateSettingsFiles.settingsFile) { UpdateSettingsManager.saveSettings() }
 }
