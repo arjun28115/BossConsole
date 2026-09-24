@@ -5,6 +5,7 @@ import ai.rever.boss.performance.PerformanceSettingsManager
 import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.run.RunnerSettingsManager
 import ai.rever.boss.terminal.TerminalLinkSettingsManager
+import ai.rever.boss.updater.UpdateSettingsManager
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assumptions
 import java.io.File
@@ -70,4 +71,12 @@ class SettingsAtomicReplaceTest {
     @Test
     fun `terminal-link settings are replaced on save, never rewritten in place`() =
         assertReplacedOnSave("terminal-link-settings.json") { TerminalLinkSettingsManager.saveSettings() }
+
+    /**
+     * Not one of the four #1659 names, but the same hazard: its load reads outside the write lock,
+     * and what a torn read resets is the user's own choices (auto-check, the dismissed version).
+     */
+    @Test
+    fun `update settings are replaced on save, never rewritten in place`() =
+        assertReplacedOnSave("update-settings.json") { UpdateSettingsManager.saveSettings() }
 }

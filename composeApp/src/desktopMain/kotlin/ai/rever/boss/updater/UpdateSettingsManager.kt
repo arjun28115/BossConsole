@@ -1,6 +1,7 @@
 package ai.rever.boss.updater
 
 import ai.rever.boss.plugin.pathutils.BossDirectories
+import ai.rever.boss.utils.atomicWriteText
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import kotlinx.coroutines.Dispatchers
@@ -164,7 +165,9 @@ actual object UpdateSettingsManager {
                         )
 
                     val content = json.encodeToString(UpdateSettingsData.serializer(), settings)
-                    settingsFile.writeText(content)
+                    // Replaced by rename, not truncated on open: the load reads outside this
+                    // lock, and a torn read resets the user's choices to defaults (#1659).
+                    settingsFile.atomicWriteText(content)
 
                     logger.debug(
                         LogCategory.SYSTEM,
