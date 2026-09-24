@@ -5,6 +5,7 @@ import ai.rever.boss.components.workspaces.LAST_SESSION_SET_FILE
 import ai.rever.boss.components.workspaces.SPACE_THEMES_FILE
 import ai.rever.boss.components.workspaces.WorkspaceFileManager
 import ai.rever.boss.components.workspaces.WorkspaceFileManagerCommon
+import ai.rever.boss.components.workspaces.reservedWorkspaceStoreFileName
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.nio.file.Files

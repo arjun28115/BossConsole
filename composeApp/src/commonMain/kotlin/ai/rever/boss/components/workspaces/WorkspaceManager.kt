@@ -583,7 +583,9 @@ class WorkspaceManager {
             // as the literal file ".json", which every id-less import then shared - the second
             // destroyed the first. The minted id is written back with the Space below, so it
             // stays stable across launches instead of being re-minted on every load.
-            val workspace = WorkspaceSerializer.deserialize(jsonString).withStableId()
+            // withImportableId, not withStableId: the id is also re-minted when it is a slot or
+            // would save over a reserved record - see withImportableId for what that destroyed.
+            val workspace = WorkspaceSerializer.deserialize(jsonString).withImportableId()
 
             // Save the imported workspace to disk
             scope.launch {
