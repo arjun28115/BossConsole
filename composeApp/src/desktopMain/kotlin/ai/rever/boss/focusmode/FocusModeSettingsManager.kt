@@ -1,6 +1,7 @@
 package ai.rever.boss.focusmode
 
 import ai.rever.boss.plugin.pathutils.BossDirectories
+import ai.rever.boss.utils.atomicWriteText
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import kotlinx.coroutines.Dispatchers
@@ -40,7 +41,10 @@ actual object FocusModeSettingsManager {
     private val _currentSettings = MutableStateFlow(platformDefaults)
     actual val currentSettings: StateFlow<FocusModeSettings> = _currentSettings.asStateFlow()
 
-    // Serializes writes so two overlapping saves cannot race each other into a torn or stale file.
+    // Serializes writes so two overlapping saves land in order and the last one persists the
+    // freshest state. Ordering is all a mutex gives: crash-safety and a reader never seeing a
+    // truncated file come from atomicWriteText, which replaces the file by rename rather than
+    // truncating it on open (#1659).
     private val saveMutex = Mutex()
 
     init {
@@ -74,7 +78,7 @@ actual object FocusModeSettingsManager {
                 // Save default settings to file
                 try {
                     val content = json.encodeToString(FocusModeSettings.serializer(), defaultSettings)
-                    settingsFile.writeText(content)
+                    settingsFile.atomicWriteText(content)
                     logger.debug(LogCategory.SYSTEM, "Created default settings file", mapOf("path" to settingsFile.absolutePath))
                 } catch (e: Exception) {
                     logger.warn(LogCategory.SYSTEM, "Could not write default settings file", error = e)
@@ -95,7 +99,7 @@ actual object FocusModeSettingsManager {
                 try {
                     // Encode inside the lock so the last writer persists the freshest state.
                     val content = json.encodeToString(FocusModeSettings.serializer(), _currentSettings.value)
-                    settingsFile.writeText(content)
+                    settingsFile.atomicWriteText(content)
                     logger.debug(LogCategory.SYSTEM, "Settings saved", mapOf("path" to settingsFile.absolutePath))
                 } catch (e: Exception) {
                     logger.warn(LogCategory.SYSTEM, "Failed to save settings", error = e)
