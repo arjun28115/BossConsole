@@ -912,8 +912,10 @@ internal suspend fun stageAndInstall(
             }
         }
     if (refusal != null) {
-        // Only the download is removed. Whatever is installed stays exactly as it was.
-        staged.delete()
+        // Only the download is removed. Whatever is installed stays exactly as it was - which
+        // means NOT removing it when the download is the destination: there is no separate
+        // download then, and deleting it would delete the installed jar this refusal protects.
+        if (movingIntoPlace) staged.delete()
         return Result.failure(IllegalStateException(refusal))
     }
 

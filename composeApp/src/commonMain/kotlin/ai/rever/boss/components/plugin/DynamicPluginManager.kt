@@ -1468,7 +1468,7 @@ class DynamicPluginManager(
             logger.warn(
                 LogCategory.SYSTEM,
                 "Plugin uninstall caller cancelled; cleanup may already have completed",
-                mapOf("pluginId" to pluginId, "stillInstalled" to isInstalled(pluginId)),
+                mapOf("pluginId" to pluginId, "stillInstalled" to hasEntry(pluginId)),
             )
             notifyPanelsRefresh(pluginId)
             throw cancelled
@@ -2239,9 +2239,16 @@ class DynamicPluginManager(
     fun getInstalledPlugins(): List<DynamicPluginInfo> = _pluginStates.value.values.toList()
 
     /**
-     * Check if a plugin is installed.
+     * Whether this manager holds an entry for [pluginId] - registry membership, and nothing more.
+     *
+     * Was `isInstalled`, a name that invites the stronger reading. An entry survives things that
+     * make a plugin unusable: `installPlugin` records a DISABLED entry for a plugin it rejected as
+     * binary incompatible and whose jar was then deleted, and a jar whose recorded path went stale
+     * keeps its entry too. The first-run wizard used this as "already installed" and skipped a plugin
+     * that was not there to run (#563). For "installed and usable", ask
+     * [PluginDependencyResolution.installedAndOnDisk].
      */
-    fun isInstalled(pluginId: String): Boolean = _pluginStates.value.containsKey(pluginId)
+    fun hasEntry(pluginId: String): Boolean = _pluginStates.value.containsKey(pluginId)
 
     /**
      * Whether the loader still holds this plugin's classes, which is NOT what [isInstalled] asks.

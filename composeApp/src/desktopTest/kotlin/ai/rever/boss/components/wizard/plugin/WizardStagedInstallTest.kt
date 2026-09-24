@@ -4,12 +4,16 @@ import ai.rever.boss.components.plugin.DynamicPluginInfo
 import ai.rever.boss.plugin.api.PluginManifest
 import ai.rever.boss.plugin.api.PluginState
 import kotlinx.coroutines.runBlocking
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.IOException
+import java.io.InputStream
 import java.nio.file.Files
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -397,5 +401,83 @@ class WizardStagedInstallTest {
         assertEquals("o" to "r", ownerAndRepo("https://github.com/o/r.git"))
         assertEquals("o" to "r", ownerAndRepo("https://github.com/o/r/"))
         assertEquals(null, ownerAndRepo("https://example.com/o/r"))
+    }
+
+    // -----------------------------------------------------------------
+    // Follow-ups from #563's merge, tracked in #1590.
+    // -----------------------------------------------------------------
+
+    /**
+     * `stageAndInstall` models an install whose download already IS the destination
+     * (`movingIntoPlace == false`), and its refusal branch deleted the download unconditionally.
+     * In that mode the download is the installed jar, so a resident refusal - the one refusal whose
+     * whole point is that something is still running from that file - deleted it. Unreachable from
+     * today's two callers, which always stage under a different name, but the function is
+     * `internal` and states the case, so it has to be right in it.
+     */
+    @Test
+    fun `a refused in-place install leaves the installed jar alone`() {
+        runBlocking {
+            val installed = file("demo-1.0.0.jar", "the running plugin's bytes")
+            var loaderReached = false
+
+            val result =
+                stageAndInstall(
+                    downloadedFile = installed,
+                    finalFile = installed,
+                    pluginId = "demo",
+                    isResident = { true },
+                ) {
+                    loaderReached = true
+                    loaded("demo")
+                }
+
+            assertTrue(result.isFailure, "a resident plugin must still be refused")
+            assertFalse(loaderReached, "nothing is loaded over a resident plugin")
+            assertTrue(installed.exists(), "the refusal protects this file; it must not delete it")
+            assertEquals("the running plugin's bytes", installed.readText())
+        }
+    }
+
+    @Test
+    fun `writeStagedDownload writes the whole stream`() {
+        val target = File(dir, "demo-1.0.0.jar.downloading.1")
+
+        writeStagedDownload(ByteArrayInputStream("complete jar bytes".toByteArray()), target)
+
+        assertEquals("complete jar bytes", target.readText())
+    }
+
+    /**
+     * A partial staging file is this call's own litter: nothing else knows its name, so nothing
+     * else would ever clean it up. The stream here delivers real bytes first, so the target exists
+     * and holds a prefix when the failure arrives - a stream that failed on its first read would
+     * pass this against a version that never deleted anything.
+     */
+    @Test
+    fun `a stream that dies mid-download leaves no partial staging file`() {
+        val target = File(dir, "demo-1.0.0.jar.downloading.2")
+        val dying =
+            object : InputStream() {
+                private var served = 0
+
+                override fun read(): Int =
+                    if (served < PREFIX_BYTES) {
+                        served++
+                        'x'.code
+                    } else {
+                        throw IOException("connection reset")
+                    }
+            }
+
+        val thrown = assertFailsWith<IOException> { writeStagedDownload(dying, target) }
+
+        assertEquals("connection reset", thrown.message, "the original failure reaches the caller")
+        assertFalse(target.exists(), "a partial download must not outlive the failure")
+    }
+
+    private companion object {
+        /** Past one copy buffer, so bytes have reached the file before the stream dies. */
+        const val PREFIX_BYTES = 16 * 1024
     }
 }
