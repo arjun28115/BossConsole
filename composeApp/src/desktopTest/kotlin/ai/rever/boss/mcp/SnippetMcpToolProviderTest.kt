@@ -135,4 +135,105 @@ class SnippetMcpToolProviderTest {
             assertTrue(call("snippet_get", args()).isError)
             assertTrue(call("snippet_delete", args()).isError)
         }
+
+    // -----------------------------------------------------------------
+    // Bounds (#1500 post-merge review, tracked in #1590). The list is read-only and allowed
+    // without asking; snippet_save is the library's only writer, and it had no size at all.
+    // -----------------------------------------------------------------
+
+    private suspend fun saveNumbered(count: Int) {
+        repeat(count) { call("snippet_save", args("title" to "s${it + 1}", "body" to "b")) }
+    }
+
+    private fun titles(result: McpToolResult): List<String> {
+        // Block body: as an expression this fits ktlint's 140 columns on one line and breaks detekt's 120.
+        val snippets = json(result)["snippets"]!!.jsonArray
+        return snippets.map { it.jsonObject["title"]!!.jsonPrimitive.content }
+    }
+
+    @Test
+    fun `the list returns one page by default and says how many there are`() =
+        runBlocking {
+            saveNumbered(60)
+
+            val listed = call("snippets_list", args())
+
+            assertEquals(SnippetMcpToolProvider.DEFAULT_LIST_LIMIT, titles(listed).size)
+            assertEquals(60, json(listed)["total"]!!.jsonPrimitive.content.toInt(), "the rest is not hidden")
+        }
+
+    @Test
+    fun `offset and limit page through the library`() =
+        runBlocking {
+            saveNumbered(25)
+
+            val second = titles(call("snippets_list", args("limit" to 10, "offset" to 10)))
+
+            assertEquals((11..20).map { "s$it" }, second, "the second page of ten, in library order")
+        }
+
+    @Test
+    fun `an out-of-range limit or offset is clamped rather than obeyed`() =
+        runBlocking {
+            saveNumbered(3)
+
+            assertEquals(3, titles(call("snippets_list", args("limit" to 10_000))).size)
+            assertEquals(1, titles(call("snippets_list", args("limit" to 0))).size)
+            assertEquals(3, titles(call("snippets_list", args("offset" to -5))).size)
+        }
+
+    @Test
+    fun `an over-long field is refused, names its limit, and stores nothing`() =
+        runBlocking {
+            listOf(
+                args("title" to "t".repeat(SnippetMcpToolProvider.MAX_TITLE_CHARS + 1), "body" to "b"),
+                args("title" to "t", "body" to "b".repeat(SnippetMcpToolProvider.MAX_BODY_CHARS + 1)),
+                args("title" to "t", "body" to "b", "tags" to "x".repeat(SnippetMcpToolProvider.MAX_TAGS_CHARS + 1)),
+            ).forEach { request ->
+                val result = call("snippet_save", request)
+                assertTrue(result.isError, "an over-long field must be refused")
+                assertTrue("the limit is" in result.text, "the refusal names the limit: ${result.text}")
+            }
+
+            assertEquals(0, SnippetLibraryManager.snippets.value.size, "a refused save must not be stored")
+        }
+
+    @Test
+    fun `fields exactly at their limits are accepted`() =
+        runBlocking {
+            val result =
+                call(
+                    "snippet_save",
+                    args(
+                        "title" to "t".repeat(SnippetMcpToolProvider.MAX_TITLE_CHARS),
+                        "body" to "b".repeat(SnippetMcpToolProvider.MAX_BODY_CHARS),
+                        "tags" to "x".repeat(SnippetMcpToolProvider.MAX_TAGS_CHARS),
+                    ),
+                )
+
+            assertFalse(result.isError, result.text)
+        }
+
+    /**
+     * A full library refuses a NEW snippet but still lets an existing one be edited: the cap bounds
+     * how much there is, not whether the library can be maintained.
+     */
+    @Test
+    fun `a full library refuses a new snippet but still accepts an update`() =
+        runBlocking {
+            repeat(SnippetMcpToolProvider.MAX_SNIPPETS) { SnippetLibraryManager.add("s$it", "b") }
+            val existing =
+                SnippetLibraryManager.snippets.value
+                    .first()
+                    .id
+
+            val create = call("snippet_save", args("title" to "one more", "body" to "b"))
+            val update = call("snippet_save", args("id" to existing, "title" to "renamed", "body" to "b"))
+
+            assertTrue(create.isError, "creating past the cap must be refused")
+            assertTrue("full" in create.text, create.text)
+            assertEquals(SnippetMcpToolProvider.MAX_SNIPPETS, SnippetLibraryManager.snippets.value.size)
+            assertFalse(update.isError, "an update does not grow the library, so it is allowed: ${update.text}")
+            assertEquals("renamed", SnippetLibraryManager.get(existing)?.title)
+        }
 }
