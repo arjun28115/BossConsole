@@ -2272,7 +2272,13 @@ opening the rotated ledger file in a text editor. The dialog is a read-only view
 tool call is refused before that, so this is not a view over every MCP invocation attempt.
 Retention is described as finite and best-effort (the active ledger file plus up to 5 rotated
 backups, and a write failure there is logged rather than retried), not a guarantee older calls
-are still on disk. Unsuccessful calls are broken down by `McpUnsuccessfulCategory` - denied,
+are still on disk. The ledger writes on a daemon thread fed by a bounded queue: a row keeps
+`hash == null` until the write lands, so the dialog renders it "queued for write" while its id
+is in `pendingWriteIds`, "not persisted" once it is counted in `droppedWrites`, and nothing once
+the chained copy arrives - a dropped or failed write never enters the hash chain, which is what
+keeps `verify` contiguous instead of reporting a drop as a LINK_BROKEN tamper verdict. The
+shutdown sequence drains the queue (`flushing MCP operation ledger on exit`) before the logger
+stops. Unsuccessful calls are broken down by `McpUnsuccessfulCategory` - denied,
 cancelled, withheld (approval queue overflow or a host disk fault that stopped the call from running) or failed - through an exhaustive `when` over `McpApprovalDisposition` rather
 than a `setOf`-based membership check, so a disposition the enum grows later is a compile error
 here rather than silently counted as a tool fault.
