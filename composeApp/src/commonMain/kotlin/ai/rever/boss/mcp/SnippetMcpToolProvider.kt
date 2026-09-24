@@ -7,6 +7,10 @@ import ai.rever.boss.plugin.api.McpToolProvider
 import ai.rever.boss.plugin.api.McpToolResult
 import ai.rever.boss.snippets.Snippet
 import ai.rever.boss.snippets.SnippetLibraryManager
+import ai.rever.boss.snippets.SnippetLibraryManager.MAX_BODY_CHARS
+import ai.rever.boss.snippets.SnippetLibraryManager.MAX_SNIPPETS
+import ai.rever.boss.snippets.SnippetLibraryManager.MAX_TAGS_CHARS
+import ai.rever.boss.snippets.SnippetLibraryManager.MAX_TITLE_CHARS
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -36,20 +40,11 @@ object SnippetMcpToolProvider : McpToolProvider {
     internal const val DEFAULT_LIST_LIMIT = 50
 
     /**
-     * The library's size. It had none: this tool is the only writer, every save rewrites the whole
-     * file, and the list is allowed without asking - so an agent could grow both without limit.
-     * Generous for a prompt library; reaching it asks for a delete, not a bigger number.
+     * The most one call returns. Below [SnippetLibraryManager.MAX_SNIPPETS] on purpose: were the two
+     * equal, clamping to it would bound nothing a full library does not already bound, and one
+     * allowed-without-asking call could still take the whole library.
      */
-    internal const val MAX_SNIPPETS = 500
-
-    /** A title a person scans in a picker. */
-    internal const val MAX_TITLE_CHARS = 200
-
-    /** A long prompt fits; a document does not. */
-    internal const val MAX_BODY_CHARS = 20_000
-
-    /** The raw comma-separated tag string. */
-    internal const val MAX_TAGS_CHARS = 500
+    internal const val MAX_LIST_LIMIT = 100
 
     override fun tools(): List<McpToolDefinition> =
         listOf(
@@ -65,15 +60,21 @@ object SnippetMcpToolProvider : McpToolProvider {
             name = name,
             description =
                 "List stored prompt/command snippets, optionally filtered to a single tag. Returns at most " +
-                    "'limit' entries (default $DEFAULT_LIST_LIMIT) starting at 'offset'; 'total' says how many match.",
+                    "'limit' entries (default $DEFAULT_LIST_LIMIT, at most $MAX_LIST_LIMIT) starting at 'offset'; " +
+                    "'total' says how many match.",
             inputSchema =
                 """
                 {
                     "type": "object",
                     "properties": {
                         "tag": { "type": "string", "description": "Optional tag to filter by (case-insensitive)" },
-                        "limit": { "type": "integer", "description": "Maximum entries to return, 1 to $MAX_SNIPPETS" },
-                        "offset": { "type": "integer", "description": "Entries to skip, for paging" }
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": $MAX_LIST_LIMIT,
+                            "description": "Maximum entries to return"
+                        },
+                        "offset": { "type": "integer", "minimum": 0, "description": "Entries to skip, for paging" }
                     }
                 }
                 """.trimIndent(),
@@ -143,10 +144,15 @@ object SnippetMcpToolProvider : McpToolProvider {
     /**
      * Paged, because this is read-only and so allowed without asking. Bodies were already left out;
      * the count was not bounded by anything, since the library had no size at all.
+     *
+     * Two things a caller should not assume. `offset` is a position, not a stable cursor: a save or
+     * delete between two pages shifts every later entry, so a walk can skip or repeat one. And a
+     * `limit` that is not an integer (a string, a fraction, a number past Int) is treated as absent,
+     * so it gets [DEFAULT_LIST_LIMIT] rather than an error.
      */
     private fun handleList(args: McpToolArgs): McpToolResult {
         val tag = args.string("tag")
-        val limit = (args.int("limit") ?: DEFAULT_LIST_LIMIT).coerceIn(1, MAX_SNIPPETS)
+        val limit = (args.int("limit") ?: DEFAULT_LIST_LIMIT).coerceIn(1, MAX_LIST_LIMIT)
         val offset = (args.int("offset") ?: 0).coerceAtLeast(0)
         val matching =
             if (tag.isNullOrBlank()) {
@@ -193,24 +199,27 @@ object SnippetMcpToolProvider : McpToolProvider {
         if (body == null) {
             return McpToolResult("body is required", isError = true)
         }
-        // This tool is the library's only writer. Refused with the limit named rather than cut, so
-        // a caller that sent too much learns it instead of finding its prompt silently truncated.
+        // The store enforces the same limits; checking here first is what lets the refusal name the
+        // field and its limit, rather than cut the prompt or surface the store's exception.
         tooLong(args)?.let { return McpToolResult(it, isError = true) }
         // Absent 'tags' means "keep the existing set" on update; an explicit
         // empty string clears it.
         val tags = args.string("tags")?.let(::parseTags)
         val id = args.string("id")
 
-        if (id.isNullOrBlank() && SnippetLibraryManager.snippets.value.size >= MAX_SNIPPETS) {
-            return McpToolResult(
-                "The snippet library is full ($MAX_SNIPPETS snippets). Delete one, or update an " +
-                    "existing snippet by passing its 'id'.",
-                isError = true,
-            )
-        }
         val saved =
             if (id.isNullOrBlank()) {
-                SnippetLibraryManager.add(title, body, tags.orEmpty())
+                // The size is checked by the store under its lock, so two creates racing at one
+                // below the limit cannot both land; a check here, outside it, could not promise that.
+                try {
+                    SnippetLibraryManager.add(title, body, tags.orEmpty())
+                } catch (_: SnippetLibraryManager.LibraryFullException) {
+                    return McpToolResult(
+                        "The snippet library is full ($MAX_SNIPPETS snippets). Delete one, or update an " +
+                            "existing snippet by passing its 'id'.",
+                        isError = true,
+                    )
+                }
             } else {
                 SnippetLibraryManager.update(id, title, body, tags)
                     ?: return McpToolResult("Snippet '$id' not found; omit 'id' to create a new one", isError = true)

@@ -2,7 +2,13 @@ package ai.rever.boss.mcp
 
 import ai.rever.boss.plugin.api.McpToolArgs
 import ai.rever.boss.plugin.api.McpToolResult
+import ai.rever.boss.snippets.Snippet
+import ai.rever.boss.snippets.SnippetLibrary
 import ai.rever.boss.snippets.SnippetLibraryManager
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
@@ -141,8 +147,26 @@ class SnippetMcpToolProviderTest {
     // without asking; snippet_save is the library's only writer, and it had no size at all.
     // -----------------------------------------------------------------
 
+    /** Creates through the tool, as an agent would, and fails the test at the first refused save. */
     private suspend fun saveNumbered(count: Int) {
-        repeat(count) { call("snippet_save", args("title" to "s${it + 1}", "body" to "b")) }
+        repeat(count) {
+            val result = call("snippet_save", args("title" to "s${it + 1}", "body" to "b"))
+            assertFalse(result.isError, "seeding save ${it + 1} was refused: ${result.text}")
+        }
+    }
+
+    /**
+     * Writes a library straight to the store's file and reloads it: a full library is 500 entries,
+     * and 500 saves through the tool rewrite the whole file 500 times.
+     */
+    private fun seedLibrary(
+        count: Int,
+        tagOf: (Int) -> List<String> = { emptyList() },
+    ) {
+        val snippets = (1..count).map { Snippet(id = "snippet-$it", title = "s$it", body = "b", tags = tagOf(it)) }
+        tempFile.writeText(Json.encodeToString(SnippetLibrary.serializer(), SnippetLibrary(snippets)))
+        SnippetLibraryManager.resetForTesting(tempFile)
+        assertEquals(count, SnippetLibraryManager.snippets.value.size, "the seeded library did not load")
     }
 
     private fun titles(result: McpToolResult): List<String> {
@@ -150,6 +174,11 @@ class SnippetMcpToolProviderTest {
         val snippets = json(result)["snippets"]!!.jsonArray
         return snippets.map { it.jsonObject["title"]!!.jsonPrimitive.content }
     }
+
+    private fun total(result: McpToolResult) = json(result)["total"]!!.jsonPrimitive.content.toInt()
+
+    // The registry hands a handler a Long for every whole JSON number (McpToolRegistryImpl.scalarOf),
+    // so limits and offsets below are Long literals: an Int would exercise a path production never takes.
 
     @Test
     fun `the list returns one page by default and says how many there are`() =
@@ -159,7 +188,7 @@ class SnippetMcpToolProviderTest {
             val listed = call("snippets_list", args())
 
             assertEquals(SnippetMcpToolProvider.DEFAULT_LIST_LIMIT, titles(listed).size)
-            assertEquals(60, json(listed)["total"]!!.jsonPrimitive.content.toInt(), "the rest is not hidden")
+            assertEquals(60, total(listed), "the rest is not hidden")
         }
 
     @Test
@@ -167,7 +196,7 @@ class SnippetMcpToolProviderTest {
         runBlocking {
             saveNumbered(25)
 
-            val second = titles(call("snippets_list", args("limit" to 10, "offset" to 10)))
+            val second = titles(call("snippets_list", args("limit" to 10L, "offset" to 10L)))
 
             assertEquals((11..20).map { "s$it" }, second, "the second page of ten, in library order")
         }
@@ -177,18 +206,69 @@ class SnippetMcpToolProviderTest {
         runBlocking {
             saveNumbered(3)
 
-            assertEquals(3, titles(call("snippets_list", args("limit" to 10_000))).size)
-            assertEquals(1, titles(call("snippets_list", args("limit" to 0))).size)
-            assertEquals(3, titles(call("snippets_list", args("offset" to -5))).size)
+            assertEquals(3, titles(call("snippets_list", args("limit" to 10_000L))).size)
+            assertEquals(1, titles(call("snippets_list", args("limit" to 0L))).size)
+            assertEquals(3, titles(call("snippets_list", args("offset" to -5L))).size)
+        }
+
+    /**
+     * The ceiling is its own number, below the library's size, so one call cannot take a full
+     * library. With the two equal the clamp would bound nothing: this is the test that says so.
+     */
+    @Test
+    fun `a large limit is clamped to one page even when the library holds more`() =
+        runBlocking {
+            seedLibrary(SnippetLibraryManager.MAX_SNIPPETS)
+
+            val listed = call("snippets_list", args("limit" to SnippetLibraryManager.MAX_SNIPPETS.toLong()))
+
+            assertEquals(SnippetMcpToolProvider.MAX_LIST_LIMIT, titles(listed).size)
+            assertEquals(SnippetLibraryManager.MAX_SNIPPETS, total(listed))
+        }
+
+    @Test
+    fun `the list schema states its bounds in machine-readable form`() {
+        val tool = SnippetMcpToolProvider.tools().first { it.name == "snippets_list" }
+        val properties = Json.parseToJsonElement(tool.inputSchema).jsonObject["properties"]!!.jsonObject
+        val limit = properties["limit"]!!.jsonObject
+        val offset = properties["offset"]!!.jsonObject
+
+        assertEquals(1, limit["minimum"]!!.jsonPrimitive.content.toInt())
+        assertEquals(SnippetMcpToolProvider.MAX_LIST_LIMIT, limit["maximum"]!!.jsonPrimitive.content.toInt())
+        assertEquals(0, offset["minimum"]!!.jsonPrimitive.content.toInt())
+    }
+
+    @Test
+    fun `an offset past the end returns an empty page and keeps the total`() =
+        runBlocking {
+            saveNumbered(5)
+
+            val listed = call("snippets_list", args("offset" to 50L))
+
+            assertFalse(listed.isError, listed.text)
+            assertTrue(titles(listed).isEmpty())
+            assertEquals(5, total(listed), "an empty page still says how many there are")
+        }
+
+    @Test
+    fun `a tag filter pages over the matching snippets and totals only those`() =
+        runBlocking {
+            // Every third snippet is tagged: s3, s6, ... s30.
+            seedLibrary(30) { if (it % 3 == 0) listOf("kotlin") else emptyList() }
+
+            val page = call("snippets_list", args("tag" to "kotlin", "limit" to 4L, "offset" to 2L))
+
+            assertEquals(10, total(page), "the total is the filtered count, not the library's")
+            assertEquals(listOf("s9", "s12", "s15", "s18"), titles(page))
         }
 
     @Test
     fun `an over-long field is refused, names its limit, and stores nothing`() =
         runBlocking {
             listOf(
-                args("title" to "t".repeat(SnippetMcpToolProvider.MAX_TITLE_CHARS + 1), "body" to "b"),
-                args("title" to "t", "body" to "b".repeat(SnippetMcpToolProvider.MAX_BODY_CHARS + 1)),
-                args("title" to "t", "body" to "b", "tags" to "x".repeat(SnippetMcpToolProvider.MAX_TAGS_CHARS + 1)),
+                args("title" to "t".repeat(SnippetLibraryManager.MAX_TITLE_CHARS + 1), "body" to "b"),
+                args("title" to "t", "body" to "b".repeat(SnippetLibraryManager.MAX_BODY_CHARS + 1)),
+                args("title" to "t", "body" to "b", "tags" to "x".repeat(SnippetLibraryManager.MAX_TAGS_CHARS + 1)),
             ).forEach { request ->
                 val result = call("snippet_save", request)
                 assertTrue(result.isError, "an over-long field must be refused")
@@ -205,9 +285,9 @@ class SnippetMcpToolProviderTest {
                 call(
                     "snippet_save",
                     args(
-                        "title" to "t".repeat(SnippetMcpToolProvider.MAX_TITLE_CHARS),
-                        "body" to "b".repeat(SnippetMcpToolProvider.MAX_BODY_CHARS),
-                        "tags" to "x".repeat(SnippetMcpToolProvider.MAX_TAGS_CHARS),
+                        "title" to "t".repeat(SnippetLibraryManager.MAX_TITLE_CHARS),
+                        "body" to "b".repeat(SnippetLibraryManager.MAX_BODY_CHARS),
+                        "tags" to "x".repeat(SnippetLibraryManager.MAX_TAGS_CHARS),
                     ),
                 )
 
@@ -221,19 +301,46 @@ class SnippetMcpToolProviderTest {
     @Test
     fun `a full library refuses a new snippet but still accepts an update`() =
         runBlocking {
-            repeat(SnippetMcpToolProvider.MAX_SNIPPETS) { SnippetLibraryManager.add("s$it", "b") }
-            val existing =
-                SnippetLibraryManager.snippets.value
-                    .first()
-                    .id
+            seedLibrary(SnippetLibraryManager.MAX_SNIPPETS)
 
             val create = call("snippet_save", args("title" to "one more", "body" to "b"))
-            val update = call("snippet_save", args("id" to existing, "title" to "renamed", "body" to "b"))
+            val update = call("snippet_save", args("id" to "snippet-1", "title" to "renamed", "body" to "b"))
 
             assertTrue(create.isError, "creating past the cap must be refused")
             assertTrue("full" in create.text, create.text)
-            assertEquals(SnippetMcpToolProvider.MAX_SNIPPETS, SnippetLibraryManager.snippets.value.size)
+            assertEquals(SnippetLibraryManager.MAX_SNIPPETS, SnippetLibraryManager.snippets.value.size)
             assertFalse(update.isError, "an update does not grow the library, so it is allowed: ${update.text}")
-            assertEquals("renamed", SnippetLibraryManager.get(existing)?.title)
+            assertEquals("renamed", SnippetLibraryManager.get("snippet-1")?.title)
         }
+
+    /**
+     * Two creates racing at one below the cap: exactly one may land. The size is checked inside the
+     * store's lock; a check before the call, outside it, lets both through and ends at cap + 1.
+     */
+    @Test
+    fun `two concurrent creates at one below the cap leave the library exactly full`() =
+        runBlocking(Dispatchers.Default) {
+            repeat(RACE_ROUNDS) { round ->
+                seedLibrary(SnippetLibraryManager.MAX_SNIPPETS - 1)
+                val start = CompletableDeferred<Unit>()
+                val results =
+                    (1..2)
+                        .map { n ->
+                            async {
+                                start.await()
+                                call("snippet_save", args("title" to "racer $n", "body" to "b"))
+                            }
+                        }.also { start.complete(Unit) }
+                        .awaitAll()
+
+                assertEquals(1, results.count { !it.isError }, "round $round: exactly one create may land")
+                val size = SnippetLibraryManager.snippets.value.size
+                assertEquals(SnippetLibraryManager.MAX_SNIPPETS, size, "round $round: the library ends exactly full")
+            }
+        }
+
+    private companion object {
+        // Rounds, because one unlucky interleaving is enough to fail and a single round can miss it.
+        const val RACE_ROUNDS = 20
+    }
 }
