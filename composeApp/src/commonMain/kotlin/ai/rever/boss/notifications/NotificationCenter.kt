@@ -33,7 +33,15 @@ import java.io.File
 object NotificationCenter {
     private val logger = BossLogger.forComponent("NotificationCenter")
 
-    /** Newest entries kept; older ones are dropped on the next post. */
+    /**
+     * Newest entries kept; older ones are dropped on the next post.
+     *
+     * The bound the caps produce together, which is the number to agree to: 200 x (200 + 4,000 +
+     * 87) characters of title, message and stamped label, about 860,000 characters of text, more on
+     * disk once JSON-escaped (a message is not flattened, and a control character escapes to six).
+     * It is rewritten in full on every post and parsed synchronously by [loadSync] at startup.
+     * [MAX_MESSAGE_CHARS] is the lever if that is too much.
+     */
     const val MAX_ENTRIES = 200
 
     private val defaultStorageFile = BossDirectories.resolve("notifications.json")
@@ -115,11 +123,20 @@ object NotificationCenter {
      * cannot turn the provenance-adjacent field into unbounded storage.
      *
      * **The size bounds are enforced here too, for every publisher.** The inbox is rewritten in full
-     * on every post and listed without approval, whoever wrote to it, so [MAX_TITLE_CHARS] and
-     * [MAX_MESSAGE_CHARS] are refused at this boundary rather than only in the MCP tool, which checks
-     * first to name the limit to its caller. A host label longer than [MAX_SOURCE_LABEL_CHARS] is
-     * refused rather than truncated: an agent's label is cut because the agent is not ours to fix,
-     * while a host label that long is a bug to catch at the call site that writes it.
+     * on every post and listed without approval, whoever wrote to it, so nothing stored exceeds
+     * [MAX_TITLE_CHARS], [MAX_MESSAGE_CHARS] or [MAX_SOURCE_LABEL_CHARS]. Whether an over-long field
+     * is refused or cut depends on who wrote it and how:
+     * - A title is refused from either origin: it is a literal, so an over-long one is a bug.
+     * - An agent's message is refused. The MCP tool checks first, so its caller learns the limit.
+     * - A host's message is cut to [MAX_MESSAGE_CHARS], ending in an ellipsis. A host builds it from
+     *   dynamic text (an exception message, a command's output), and refusing would turn a notice
+     *   about one problem into a second problem on an error path.
+     * - A host's label is flattened to one line like an agent's, then refused if it is still over
+     *   [MAX_SOURCE_LABEL_CHARS]. An agent's label is cut instead: the agent is not ours to fix.
+     *
+     * @throws IllegalArgumentException if the title is blank or over [MAX_TITLE_CHARS], if an
+     *   [NotificationOrigin.AGENT] message is over [MAX_MESSAGE_CHARS], or if a
+     *   [NotificationOrigin.HOST] label, once flattened and trimmed, is over [MAX_SOURCE_LABEL_CHARS].
      */
     suspend fun post(
         title: String,
@@ -130,18 +147,24 @@ object NotificationCenter {
     ): BossNotification {
         require(title.isNotBlank()) { "Notification title must not be blank" }
         require(title.length <= MAX_TITLE_CHARS) { "Notification title is over $MAX_TITLE_CHARS characters" }
-        require(message.length <= MAX_MESSAGE_CHARS) { "Notification message is over $MAX_MESSAGE_CHARS characters" }
-        require(origin != NotificationOrigin.HOST || source.trim().length <= MAX_SOURCE_LABEL_CHARS) {
+        require(origin == NotificationOrigin.HOST || message.length <= MAX_MESSAGE_CHARS) {
+            "Notification message is over $MAX_MESSAGE_CHARS characters"
+        }
+        // Measured on the stamped label, which is exactly what is stored, so the check cannot refuse
+        // a label that would have fitted once flattened and trimmed.
+        val stamped = stampedSource(source, origin)
+        require(origin != NotificationOrigin.HOST || stamped.length <= MAX_SOURCE_LABEL_CHARS) {
             "A host notification's source label is over $MAX_SOURCE_LABEL_CHARS characters"
         }
+        val storedMessage = if (origin == NotificationOrigin.HOST) cappedMessage(message) else message
         return mutex.withLock {
             val entry =
                 BossNotification(
                     id = generateUniqueId(),
                     title = title,
-                    message = message,
+                    message = storedMessage,
                     level = level,
-                    source = stampedSource(source, origin),
+                    source = stamped,
                     origin = origin,
                     createdAt = clock(),
                     read = false,
@@ -175,19 +198,20 @@ object NotificationCenter {
     const val MAX_MESSAGE_CHARS = 4_000
 
     /**
-     * Characters a demoted label may not keep: every ISO control character (newline, carriage
+     * Characters a stored label may not keep: every ISO control character (newline, carriage
      * return, tab, NUL, ...) plus the Unicode line and paragraph separators. [stampedSource]
      * flattens each to a space, so an agent-supplied label renders on a single prefixed line
      * and cannot present a second, unprefixed `System: ...` line wherever the inbox prints it.
+     * A host label is flattened the same way, so every label is one line.
      */
     private val unsafeLabelChars = Regex("[\\p{Cc}\\u2028\\u2029]")
 
     /**
      * The `source` the entry actually stores, per the provenance contract in [post]: the host
      * labels itself, an agent's label is demoted to a bounded display string that cannot present
-     * as system origin. A blank or whitespace label is treated as absent. A demoted label is
-     * flattened to one line first - [unsafeLabelChars] - because the length cap cannot reach a
-     * newline sitting inside it.
+     * as system origin. A blank or whitespace label is treated as absent. Either label is
+     * flattened to one line first - [unsafeLabelChars] - so it renders on one line wherever the
+     * inbox prints it, and so the length cap cannot miss a newline sitting inside it.
      */
     internal fun stampedSource(
         source: String,
@@ -195,7 +219,7 @@ object NotificationCenter {
     ): String =
         when (origin) {
             NotificationOrigin.HOST -> {
-                source.trim()
+                unsafeLabelChars.replace(source, " ").trim()
             }
 
             NotificationOrigin.AGENT -> {
@@ -271,4 +295,17 @@ object NotificationCenter {
         } while (_notifications.value.any { it.id == id })
         return id
     }
+}
+
+private const val TRUNCATION_MARK = "\u2026"
+
+/**
+ * [message] cut to [NotificationCenter.MAX_MESSAGE_CHARS], ending in an ellipsis when anything was
+ * cut, and never splitting a surrogate pair: half of one would be stored as a lone surrogate.
+ */
+private fun cappedMessage(message: String): String {
+    if (message.length <= NotificationCenter.MAX_MESSAGE_CHARS) return message
+    var end = NotificationCenter.MAX_MESSAGE_CHARS - 1
+    if (message[end - 1].isHighSurrogate()) end -= 1
+    return message.substring(0, end) + TRUNCATION_MARK
 }
