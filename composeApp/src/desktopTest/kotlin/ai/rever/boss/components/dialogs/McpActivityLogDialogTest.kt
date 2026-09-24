@@ -64,6 +64,7 @@ class McpActivityLogDialogTest {
             // Unlike POLICY_PERSIST_FAILED, this one's own KDoc says the call in hand still
             // executes - a rare isError = true here is the executed tool genuinely failing.
             McpApprovalDisposition.PROVIDER_TRUST_PERSIST_FAILED,
+            McpApprovalDisposition.YOLO_ALLOWED,
         ).forEach { disposition ->
             assertEquals(McpUnsuccessfulCategory.FAILED, disposition.unsuccessfulCategory, disposition.name)
         }
@@ -105,6 +106,28 @@ class McpActivityLogDialogTest {
         } finally {
             Locale.setDefault(original)
         }
+    }
+
+    @Test
+    fun `a hashed record shows no persistence state - it is on disk`() {
+        val op = record(McpApprovalDisposition.AUTO_ALLOWED, isError = false).copy(hash = "abc", parentHash = "def")
+        assertEquals(null, op.persistenceState(ledgerConfigured = true, pendingWriteIds = emptySet()))
+        assertEquals(null, op.persistenceState(ledgerConfigured = true, pendingWriteIds = setOf(op.id)))
+    }
+
+    @Test
+    fun `an unhashed record distinguishes queued from never persisted`() {
+        val op = record(McpApprovalDisposition.AUTO_ALLOWED, isError = false)
+        assertEquals(
+            McpPersistenceState.QUEUED,
+            op.persistenceState(ledgerConfigured = true, pendingWriteIds = setOf(op.id)),
+        )
+        assertEquals(
+            McpPersistenceState.NOT_PERSISTED,
+            op.persistenceState(ledgerConfigured = true, pendingWriteIds = emptySet()),
+        )
+        // A ledger with no file has nothing to report either way.
+        assertEquals(null, op.persistenceState(ledgerConfigured = false, pendingWriteIds = emptySet()))
     }
 
     private fun record(

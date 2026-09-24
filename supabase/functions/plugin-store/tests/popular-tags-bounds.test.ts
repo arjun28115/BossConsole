@@ -3,6 +3,7 @@ import { OpenAPIHono } from "@hono/zod-openapi"
 import type { SupabaseClient } from "@supabase/supabase-js"
 import type { PluginStoreContext } from "../types/context.ts"
 import browse from "../routes/browse.ts"
+import { resetRateLimits } from "../utils/rate-limit.ts"
 
 /**
  * GET /tags/popular is public and sends the anon key. Its `limit` used to reach
@@ -13,6 +14,11 @@ import browse from "../routes/browse.ts"
  */
 
 function app(client: SupabaseClient) {
+  // The popular-tags route is now behind the catalogue rate limit, whose buckets are module
+  // state shared with every other test file. Without a reset, requests made elsewhere spend
+  // this key's budget and a validation test here gets a 429 instead of the 400 it checks.
+  // The limiter itself is tested in hardening.test.ts.
+  resetRateLimits()
   const instance = new OpenAPIHono<{ Variables: PluginStoreContext }>()
   instance.use("*", async (ctx, next) => {
     ctx.set("supabase", client)

@@ -232,6 +232,17 @@ manager directly rather than `loadPlugin`, and for the same reason as before: an
 question must never produce a second dialog. What changed is that the first question now covers
 the whole closure, where it used to cover one plugin and stay silent about the rest.
 
+A plugin pack consents through `pack_plan` rather than this dialog, and the same rule holds:
+`pack_plan` resolves each install's closure with the same `planFor` and returns the extra ids as
+`alsoInstalls`, with `closureComplete: false` plus `unresolved`, `cyclic` or `truncated` when the
+walk could not see all of it. `pack_apply` installs the order its own fresh plan resolved and is
+handed that order rather than re-walking the store, so the installs cannot exceed the closure
+that apply's own plan resolved - a walk repeated at install time could follow store rows that
+changed in between. That bounds the install to the plan, not to what the operator saw: the
+`pack_apply` approval dialog shows the raw pack arguments, so a direct `pack_apply` with no
+earlier `pack_plan` has no closure in its consent. Showing the closure in that dialog is a
+recorded follow-up.
+
 Three properties of the plan are worth knowing before touching it. The plugin the user was asked
 about is always in the plan and always last, even if it turns out to be present, because the
 Install guard already answers that and an empty plan has no sensible reading. A store that cannot
@@ -765,6 +776,25 @@ the next managed-profile creation. This is not a guaranteed shutdown flush. This
 is not an engine-abort mechanism and does not coordinate external raw-JxBrowser
 callers or engine-level forced closure.
 
+## JxBrowser's native libraries swap the process's malloc zones when they load
+
+On macOS each of JxBrowser's JNI libraries (`libtoolkit`, `libipc`, `libawt_toolkit`) makes
+PartitionAlloc the default malloc zone in a static initializer, briefly unregistering the system
+zone; a `free()` on another thread in that gap is an uncatchable SIGTRAP. `ChromiumToolkitPreload`
+loads the first two on the main thread before the engine pre-warm. Its KDoc is the canonical
+account (mechanism, measurements, what it does not cover); keep it there rather than here.
+
+Rules for anyone touching it:
+
+- **Preload only from the directory `FluckEngine.resolveEngineDir` boots**, or the library loads
+  twice from two paths and swaps zones twice.
+- **JxBrowser must stay in the host class loader.** A plugin that bundled JxBrowser would get
+  `already loaded in another classloader` for a library the host preloaded.
+- **Known gaps:** `libawt_toolkit` is not preloaded (it links `libjawt` and must follow AWT), and
+  a first-run download-then-boot gets no preload. Off switch: `BOSS_TOOLKIT_PRELOAD=false`.
+- **Re-measure after a JxBrowser bump.** The offsets in the KDoc are for 9.5.0 / Chromium
+  152.0.7977.65; check the zone swap still sits in a static initializer before trusting them.
+
 ## Browser telemetry, and how to turn it off
 
 The integrated browser reports which sites BOSS is used with and how - page views,
@@ -807,8 +837,12 @@ restart. There is no Settings row and no per-site exclusion.
   bridge. Project paths routinely contain usernames, so this widens *when* a filesystem
   path reaches every installed plugin, not *what* - the same install-time-gating stance
   as the bus above applies. In particular, `boss://` links can originate outside BOSS and
-  only a deep link that would start a terminal command consults `DeepLinkOrigin`, so an
+  a deep link that would start a terminal command, and a plugin action link, consult
+  `DeepLinkOrigin`; project/file deep links still do not, so an
   externally opened project link can trigger this broadcast without operator confirmation.
+  Plugin action links are the exception: external and in-process-plugin requests are held for
+  confirmation before their registered handler runs, including when they arrive before any
+  window exists, in which case they wait for the first one.
   It is recorded here because this paragraph is the canonical list of what a third-party
   plugin can observe.
 - **`PluginContext.projectSearchProvider` is the first UNGATED WRITE surface.**
@@ -961,8 +995,8 @@ URL produces the same input. Entry points therefore tag each link with a
   Also the default for an unstated origin, so a new caller that forgets to say
   gets the cautious handling.
 
-Two hosts consult it, and both for the same reason - each can type a command
-into a shell:
+Three hosts consult it. The first two share a reason - each can type a command
+into a shell - and the third reaches a plugin's own code instead:
 
 - `boss://terminal?command=`: an `OPERATOR_CLI` command runs as before, anything
   else is shown to the operator for confirmation first (the `boss` shell shim
@@ -976,8 +1010,36 @@ into a shell:
   `CLICommand.LoadWorkspace` through the cold-start readiness queue to
   `WorkspaceLoadEvent.requiresConfirmation`, because only the window parses the
   file and so only it knows whether there is anything to confirm.
+- `boss://plugin?id=…&action=…`: the link dispatches into a plugin's registered
+  `DeepLinkActionHandler`, which is a program the operator did not ask to run, so an
+  `EXTERNAL` request is held (`pluginActionDisposition`) and
+  `PluginActionApprovalDialog` shows the handler, the action and the parameter KEYS -
+  never a parameter value, which is attacker-chosen text. Malformed prompt tokens are
+  refused outright.
 
-Other hosts - including `boss://plugin?id=…&action=…` - are unchanged.
+No other host consults it.
+
+A terminal request with no usable window is refused. A **plugin action** with no usable
+window is instead *retained* by `PluginActionEventBus` until some window claims it, because
+that is the ordinary cold-start path rather than an edge case: `CliBootstrap.dispatchPostLock`
+runs an argv link before `application {}` builds the first window, so refusing there meant a
+link clicked while BOSS was not running was never put to the operator at all. A retained
+request has not run and still cannot run without a confirmation, so this widens nothing. The
+registry is bounded (`MAX_PENDING`); a request arriving when it is full is refused, not
+dropped silently. Every open window is offered every retained request and
+`shouldClaimPluginAction` decides whose it is - the window it resolved to, or any window once
+that one has closed - so exactly one window shows it. A window claims one request at a time,
+only while nothing is on screen (`PluginActionApprovalQueue.canClaim`), as the dependency bus
+does, so every other request stays retained for the next window. Closing a window after its
+prompt appears can still abandon that one claimed request. Because the window's own queue
+holds only the prompt on screen, the prompt's "(n pending)" counts that one plus every request
+still retained on the bus (`pluginActionBacklog`), so a flood of links is visible. The wiring
+lives in `PluginActionApprovalPrompt`, not inline in `BossAppDialogs`, so a test drives the real
+count. A retained request carries no age and does not expire: the registry is bounded and a
+request reaches its handler only through the prompt, so a prompt shown long after the link was
+clicked still fails closed rather than acting on its own. That is a recorded decision, not an
+oversight - a TTL, or the arrival time in the prompt text, would make a late prompt easier for
+the operator to place.
 
 **Single-instance channel**: `SingleInstanceManager` publishes
 `~/.boss/run/single-instance` (owner-only) with the channel endpoint and a token
@@ -986,10 +1048,12 @@ Linux) or a loopback port (Windows). Every request must present the token,
 "another instance is running" means something answered on the channel rather than
 a pid existing, and a descriptor nobody answers on is reclaimed.
 
-A forwarded plugin action (`boss://plugin?id=...&action=...`) is acknowledged
-only when its handler reports true. Missing ids, missing handlers, declined
-and throwing handlers report failure. The channel waits up to five seconds;
-a timeout reports an unknown outcome and cancels dispatch if it is still queued.
+A forwarded operator-origin plugin action (`boss://plugin?id=...&action=...`) is
+acknowledged only when its handler reports true. An external action is acknowledged when
+it is queued for confirmation, before anything runs. Missing ids, refused actions, missing
+handlers, declined and throwing operator-origin handlers report failure. The channel waits
+up to five seconds for a direct dispatch; a timeout reports an unknown outcome and cancels it
+if it is still queued.
 An already-running synchronous handler cannot be interrupted. Startup therefore
 never retries plugin actions automatically, even after a lost response; auth and
 other open requests retain their existing retries. Panel-open links still only
@@ -2094,16 +2158,17 @@ defence against a hostile one that lies. Unknown tool names default to ALLOW whi
 the provider declares (or defaults to) `readOnly = true`. Known mutations default to ASK with
 a 45-second timeout. Each queued prompt is delivered to exactly one window and
 window teardown denies its owned request. Session trust is process-wide and can
-be cleared using “Revoke MCP session trust” in the bottom bar; restore the bar if
+be reviewed and revoked per tool (or all at once) from “Session trust” in the bottom bar's MCP access menu; restore the bar if
 it is hidden. Session trust is keyed to the exact provider the operator approved (#815): a same-named
 tool from a different provider gets its own ASK instead of inheriting the grant - the tool-name squat.
 McpSessionTrust keeps the (providerId, toolName) identity the engine uses everywhere else: a name-only
 grant would hand an unvetted plugin the approval its sibling earned, and trusting less than the operator
 meant is the fail-closed direction. Revocation stays name-wide as the operator escape hatch:
 revokeSessionTrust(toolName, providerId = null) still clears every provider's trust for that name, and
-over-removing trust fails closed. The approval dialog offers Always Allow and Always Deny, which save
-a tool-wide rule for all agents and arguments across restarts. Saved rules can be
-reviewed and reset from “Persisted MCP policies” in the bottom bar; a reset removes
+over-removing trust fails closed. The approval dialog's “Always, for this tool” scope (Always allow / Always deny) saves
+a tool-wide rule for all agents and arguments across restarts (except that a saved allow does not cover a shell
+call the risk evaluator rates CRITICAL - see the destructive-shell gate under the workspace/terminal tools below). Saved rules can be
+reviewed and reset from “Tool policies” in the bottom bar's MCP access menu; a reset removes
 the rule and clears that tool's session trust, so the tool uses the configured default
 policy (ASK for known mutations in the shipped defaults). Unrelated DENYs remain intact.
 A failed reset keeps the previous durable rule visible and clears the selected session
@@ -2112,9 +2177,9 @@ POLICY_PERSIST_FAILED and withhold the current execution. A queued approval cann
 replace a newer DENY or reset: each reset invalidates older authorizations before their
 final approval boundary, including queued once/session/persistent grants. Calls already
 authorized to execute are not cancelled. Reset remains host UI only, not an MCP tool.
-“Trust This Plugin” persists a provider-wide ALLOW covering every tool that provider
+“Trust plugin” (the “Always, for every tool from this plugin” scope) persists a provider-wide ALLOW covering every tool that provider
 contributes - weaker than an explicit tool-specific rule, reviewed and reset from
-“Trusted plugins” in the bottom bar rather than “Persisted MCP policies”. The same
+“Trusted plugins” in the MCP access menu rather than “Tool policies”. The same
 reset-invalidates-queued-grants guarantee applies to it: the write rechecks the
 prompting tool's and provider's revocation state, plus DENY, under the policy lock, so a reset landing
 while the dialog is open refuses the write and withholds that call instead of persisting
@@ -2123,10 +2188,45 @@ write that fails for a genuine disk error (not a stale-dialog refusal) still run
 already-approved call, falling back to session trust for that one tool only - a
 deliberate asymmetry, since the operator already approved the call in hand and a disk
 fault should not retroactively withhold it.
+The approval dialog asks for a scope once (just this call, this session, always for this tool,
+always for every tool from this plugin) and answers with one Deny / Allow pair whose labels name
+the effect; there is no session or provider-wide deny, so under those scopes Deny reads “Deny
+once”. The bottom bar shows all three consent surfaces (session trust, tool policies, trusted
+plugins) behind one “MCP access” item, badged in the alert colour while session trust is live.
+The "Always, for this tool" scope says in the dialog that it is keyed by tool name, so it also
+covers a replacement plugin shipping a tool of that name - the one place the operator is told.
 Provider trust also covers tools added by later versions and replacement plugins claiming
 that provider id. Already queued sibling prompts still ask. Explicit tool ASK rules
 still override provider ALLOW. The Trusted plugins UI lists ALLOW rules only; hand-edited
 provider DENY rules currently require policy-file editing to remove.
+
+**YOLO mode** makes any call whose policy resolves to ASK run without prompting, for every tool
+and provider, CRITICAL-risk ones and tools registered later included. Any user can turn it on,
+behind one confirmation (`McpYoloConfirmation`, composed per window in `BossAppDialogs` and
+raised through `McpYoloPrompt`), from either of two places: **MCP access → YOLO mode...** in the
+bottom bar, or the **Tools → MCP YOLO Mode** checkbox in the application menu. The menu item is
+not a convenience: the bar can be hidden (`showBottomBar`, and Focus mode hides it by default),
+and a live global bypass must keep an indicator and an off switch that survive that. Its
+checkmark is the indicator and unchecking turns the mode off; in the bar it reads "MCP: YOLO"
+in the alert colour with "Turn off YOLO mode" first in the menu.
+
+- **It replaces only the prompt.** `policyFor` is untouched, so explicit tool or provider DENY,
+  an unreadable policy file, the kill switch and RBAC still refuse first, and a revoke or DENY
+  landing mid-flight still stops the call at `confirmInvocation`. `McpYoloModeTest` drives the
+  real registry to pin this.
+- **In memory only** (`McpPolicyEngine.yoloMode`), off at every launch. Prompts already queued
+  when it is turned on still ask.
+- **Audited in the ledger, both the calls and the switch.** Each call it lets through is
+  `YOLO_ALLOWED` with `policyApplied = ASK`. Turning it on or off writes a `YOLO_ENABLED` /
+  `YOLO_DISABLED` marker (tool `yolo_mode`, provider `host`) through `McpToolRegistryCore
+  .setYoloMode`, so a window in which calls could run unattended is in the hash-chained record
+  even if nothing was invoked. Markers do not count as calls (`countsAsCall = false`), and the
+  bar's last-call line skips them (`isGovernanceEvent`). Always switch through
+  `McpToolRegistryImpl.setYoloMode`, never `policyEngine.setYoloMode` directly, or the marker is
+  lost.
+- **A deployment can refuse it**: `BOSS_MCP_YOLO_DISABLED=true` (also `1` / `yes` / `on`) or
+  `-Dboss.mcp.yolo.disabled=true` hides both entry points and makes turning it on a logged no-op.
+  Read once at startup (`McpYoloGate`). Turning it off is never refused.
 
 Preserve a backup before manual recovery of a damaged policy;
 the fault flow withholds all tools until recovery. No automatic quarantine UI is
@@ -2146,6 +2246,16 @@ create_workspace, open_terminal, close_workspace and their aliases) are declared
 on `open_terminal` therefore runs later invocations unconfirmed, i.e. as strong as an
 unconfirmed external deep link; the command still passes the shape check and the shell
 risk evaluation (HIGH, CRITICAL for destructive patterns) on every call.
+
+A saved ALLOW - "Always, for this tool", a trusted plugin or session trust - does not cover a
+shell call the evaluator rates CRITICAL: that call is asked again every time (#1577), with the
+prompt marked escalated. On an escalated prompt "Always, for this tool" is deny-only ("Always
+deny this tool"): the allow button stays "Allow once" whatever scope is selected, and the registry
+applies any broader approval of an escalated call as once, logging the downgrade. A saved DENY is
+never overridden, so it is the durable answer there (#1624). Shell tools are rated on every
+string in their arguments. Arguments nested past MAX_MCP_ARGUMENT_DEPTH rate CRITICAL without being
+parsed (every parse on the invoke path checks the same depth guard first); arguments too wide to
+scan fully rate CRITICAL on the part that was not inspected.
 
 ## Process log authority and lifetime
 
@@ -2173,7 +2283,13 @@ opening the rotated ledger file in a text editor. The dialog is a read-only view
 tool call is refused before that, so this is not a view over every MCP invocation attempt.
 Retention is described as finite and best-effort (the active ledger file plus up to 5 rotated
 backups, and a write failure there is logged rather than retried), not a guarantee older calls
-are still on disk. Unsuccessful calls are broken down by `McpUnsuccessfulCategory` - denied,
+are still on disk. The ledger writes on a daemon thread fed by a bounded queue: a row keeps
+`hash == null` until the write lands, so the dialog renders it "queued for write" while its id
+is in `pendingWriteIds`, "not persisted" once it is counted in `droppedWrites`, and nothing once
+the chained copy arrives - a dropped or failed write never enters the hash chain, which is what
+keeps `verify` contiguous instead of reporting a drop as a LINK_BROKEN tamper verdict. The
+shutdown sequence drains the queue (`flushing MCP operation ledger on exit`) before the logger
+stops. Unsuccessful calls are broken down by `McpUnsuccessfulCategory` - denied,
 cancelled, withheld (approval queue overflow or a host disk fault that stopped the call from running) or failed - through an exhaustive `when` over `McpApprovalDisposition` rather
 than a `setOf`-based membership check, so a disposition the enum grows later is a compile error
 here rather than silently counted as a tool fault.
@@ -2195,9 +2311,9 @@ The viewer uses the ledger instance's actual optional persistence path. Its tool
 heavyweight overlay route. Width and height follow the originating window, with a fixed-cap fallback
 while window metadata is not yet measured; Close stays outside the scrolling body.
 
-**The "Persisted MCP policies" bottom bar button also lets an operator set a rule
+**The "Tool policies" entry of the bottom bar's MCP access menu also lets an operator set a rule
 *proactively*, for a registered tool without a saved rule.** It is present even with zero saved
-rules (labeled "Set MCP tool policies" then). Allow requires a second confirming tap
+rules. Allow requires a second confirming tap
 and shows the tool's risk assessment first, the same way the approval dialog's own
 "Always Allow" does, since it is the same durable, tool-name-wide grant. The write goes
 through `McpPolicyEngine.setToolPolicyIfAbsent`, not the reactive approval path's
@@ -2301,3 +2417,13 @@ update it with the pinned distribution checksum and scaffold validation together
 - `atomicWriteText` pins POSIX files to 0600. The separate `writeModeFile` writer for `env_vars` preserves existing permissions; that rule does not apply to all state writers.
 - Chromium's constructed GitHub backup URL uses the catalog checksum. Primary and backup must contain identical artifact bytes; checksum mismatch fails closed. See `docs/dev-935-release-checklist.md` for deployment checks.
 - Browser print is a direct-native exception to the usual AWT ownership rule after macOS manual verification. Pending AWT cancellation is best-effort, not a cross-thread exactly-once guarantee; do not copy this pattern for destructive actions.
+
+### Run scan publication ownership
+
+Run configurations retain a process-wide detected list. Scans from different windows may
+overlap, but only the latest request owns its results, error, and busy state. A short
+`scanLock` protects ownership and publication, never filesystem traversal. `clearDetected`
+invalidates pending publication and clears scan status; it does not cancel detector work.
+Cancellation propagates without becoming a scan error. The internal scanner overload lets
+`RunConfigurationScanOwnershipTest` control completion order on the real manager without
+mutating a global detector or reading a user's project.

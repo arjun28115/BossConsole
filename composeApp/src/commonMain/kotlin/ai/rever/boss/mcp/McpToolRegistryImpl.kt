@@ -2,6 +2,7 @@ package ai.rever.boss.mcp
 
 import ai.rever.boss.components.bars.horizontal.StatusMessageManager
 import ai.rever.boss.mcp.sandbox.DefaultMcpRiskEvaluator
+import ai.rever.boss.mcp.sandbox.McpRiskLevel
 import ai.rever.boss.plugin.api.McpToolArgs
 import ai.rever.boss.plugin.api.McpToolDefinition
 import ai.rever.boss.plugin.api.McpToolProvider
@@ -12,6 +13,7 @@ import ai.rever.boss.plugin.logging.LogSanitizer
 import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.utils.atomicWriteText
 import ai.rever.boss.utils.logging.BossLogger
+import ai.rever.boss.utils.logging.ComponentLogger
 import ai.rever.boss.utils.logging.LogCategory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -125,6 +127,9 @@ object McpToolRegistryImpl : McpToolRegistry {
 
     init {
         registerProvider(WorkspaceMcpToolProvider)
+        registerProvider(SnippetMcpToolProvider)
+        registerProvider(NotificationMcpToolProvider)
+        registerProvider(IntrospectionMcpToolProvider)
     }
 
     override val allTools: StateFlow<List<RegisteredMcpTool>> get() = core.allTools
@@ -170,6 +175,15 @@ object McpToolRegistryImpl : McpToolRegistry {
         toolName: String,
         arguments: String,
     ): McpToolResult = core.invoke(toolName, arguments)
+
+    /** See [McpPolicyEngine.yoloMode]. */
+    val yoloMode: StateFlow<Boolean> get() = core.policyEngine.yoloMode
+
+    /** False when the deployment refuses YOLO mode ([McpYoloGate]); both entry points hide. */
+    val yoloAvailable: Boolean get() = core.yoloAvailable
+
+    /** See `Core.setYoloMode`. The only way UI should switch YOLO mode. */
+    suspend fun setYoloMode(enabled: Boolean): Boolean = core.setYoloMode(enabled)
 }
 
 /**
@@ -384,8 +398,42 @@ internal class McpToolRegistryCore(
     val policyEngine: McpPolicyEngine = McpPolicyEngine(),
     val approvalBus: McpApprovalBus = McpApprovalBus(),
     val ledger: McpOperationLedger = McpOperationLedger(),
+    /** Injected so tests need not set process env; production reads [McpYoloGate]. */
+    val yoloAvailable: Boolean = !McpYoloGate.disabledByDeployment,
 ) {
     private val logger = BossLogger.forComponent("McpToolRegistry")
+
+    /**
+     * Switch YOLO mode, and record the switch in the ledger. Returns false (and changes nothing)
+     * when turning it on is refused by the deployment ([yoloAvailable]); turning it off is never
+     * refused. A no-op switch writes nothing, so the ledger holds one marker per real transition.
+     *
+     * The flag flips before the ledger write so "off" takes effect immediately even if the disk
+     * is slow; the write runs on [Dispatchers.IO] because the ledger does synchronous file I/O.
+     */
+    @Suppress("ReturnCount") // Refused, no-op and switched are three distinct outcomes.
+    suspend fun setYoloMode(enabled: Boolean): Boolean {
+        if (enabled && !yoloAvailable) {
+            logger.warn(LogCategory.SYSTEM, "MCP YOLO mode refused: disabled by deployment")
+            return false
+        }
+        if (policyEngine.yoloMode.value == enabled) return true
+        policyEngine.setYoloMode(enabled)
+        withContext(NonCancellable + Dispatchers.IO) {
+            ledger.record(
+                toolName = McpYoloMode.LEDGER_TOOL_NAME,
+                providerId = McpYoloMode.LEDGER_PROVIDER_ID,
+                policyApplied = McpPolicyAction.ASK,
+                approvalDisposition =
+                    if (enabled) McpApprovalDisposition.YOLO_ENABLED else McpApprovalDisposition.YOLO_DISABLED,
+                durationMs = 0L,
+                isError = false,
+                rawArgs = emptyMap(),
+                countsAsCall = false,
+            )
+        }
+        return true
+    }
 
     /**
      * Serializes all mutations + recomputes (see [McpToolRegistryImpl] KDoc).
@@ -747,19 +795,20 @@ internal class McpToolRegistryCore(
         val tool =
             _tools.value.firstOrNull { it.definition.name == toolName }
                 ?: return McpToolResult("Unknown or disabled MCP tool: $toolName", isError = true)
-        val args = parseArgs(arguments)
+        val args = parseMcpToolArgs(arguments, logger)
         val revocation = policyEngine.revocationVersion(toolName, tool.providerId)
         // The definition's own readOnly declaration rides along on every policy consult for
         // this invocation: a tool that declared side effects classifies as mutating whatever
         // its name says (#804), so it gets the mutating default - ASK under the factory
         // config - rather than being auto-allowed for avoiding the catalog's name patterns.
-        val policy = policyEngine.policyFor(toolName, tool.providerId, tool.definition.readOnly)
+        val savedPolicy = policyEngine.policyFor(toolName, tool.providerId, tool.definition.readOnly)
+        val policy = askBeforeDestructiveShell(toolName, args, savedPolicy)
         val startTime = System.nanoTime()
         var disposition = McpApprovalDisposition.AUTO_ALLOWED
         var result: McpToolResult? = null
         var executionStarted = false
         try {
-            val authorization = authorizeInvocation(tool, args, policy, revocation)
+            val authorization = authorizeInvocation(tool, args, policy, revocation, escalated = policy != savedPolicy)
             disposition = authorization.first
             val denial = authorization.second
             result =
@@ -788,6 +837,10 @@ internal class McpToolRegistryCore(
                 }
             throw cancelled
         } finally {
+            // NonCancellable because a cancelled invoke is still an event the audit journal
+            // must capture; Dispatchers.IO because invoke() is callable from any dispatcher
+            // (including Main), and record() still runs argument sanitization plus the queue
+            // hop on the caller - the disk work itself belongs to the writer thread.
             withContext(NonCancellable + Dispatchers.IO) {
                 ledger.record(
                     toolName = toolName,
@@ -949,11 +1002,71 @@ internal class McpToolRegistryCore(
             }
         }
 
+    /**
+     * A saved ALLOW on a shell tool means "don't ask for routine calls", not "run anything" (#1577).
+     *
+     * Every shell call already rates HIGH - arbitrary command execution - so HIGH cannot be the
+     * line, or "Always Allow" would ask every time and mean nothing. CRITICAL is: the evaluator
+     * reserves it for destructive command wording (`rm -rf`, `git push --force`, `mkfs`, ...), and
+     * those calls go back to ASK, where the operator sees the same assessment on the prompt.
+     *
+     * The assessment is of the very [args] this invocation executes - parsed once in [invoke] and
+     * never re-read - so the arguments cannot change between this check and the call. Tool names
+     * are matched through [DefaultMcpRiskEvaluator.isShellTool], the evaluator's own
+     * normalization, so the two cannot disagree about which calls are shell calls. DENY and ASK
+     * pass through untouched, and so does ALLOW for every non-shell tool, whose risk is fixed by
+     * its name and already weighed when the policy was saved. The ALLOW may be a tool rule or a
+     * provider-wide "Trust This Plugin" rule; both are covered.
+     */
+    private fun askBeforeDestructiveShell(
+        toolName: String,
+        args: McpToolArgs,
+        policy: McpPolicyAction,
+    ): McpPolicyAction =
+        if (
+            policy == McpPolicyAction.ALLOW &&
+            DefaultMcpRiskEvaluator.isShellTool(toolName) &&
+            DefaultMcpRiskEvaluator().evaluateRisk(toolName, args).level >= McpRiskLevel.CRITICAL
+        ) {
+            McpPolicyAction.ASK
+        } else {
+            policy
+        }
+
+    /**
+     * [escalated] is true when [askBeforeDestructiveShell] turned a saved ALLOW into this ASK. A
+     * rule saved from such a prompt would change nothing - the gate overrides it on the next
+     * destructive call - so an approval here always counts as once, whatever scope came back
+     * (#1624). The dialog offers only that scope; this holds the line if a caller asks for more.
+     */
+
+    /**
+     * An approval of an escalated call counts as once, whatever scope came back (#1624). The dialog
+     * never asks for more there, so a broader request came from another caller of the approval
+     * bus: it is logged, or the ledger's APPROVED_ONCE would carry no explanation.
+     */
+    private fun onceIfEscalated(
+        tool: RegisteredMcpTool,
+        decision: McpApprovalDecision.Approved,
+        escalated: Boolean,
+    ): McpApprovalDecision.Approved {
+        if (!escalated) return decision
+        if (decision.trustForSession || decision.persistPolicy || decision.trustProvider) {
+            logger.warn(
+                LogCategory.SYSTEM,
+                "Escalated MCP approval asked to be remembered; applied once only",
+                mapOf("tool" to tool.definition.name, "provider" to tool.providerId),
+            )
+        }
+        return McpApprovalDecision.Approved()
+    }
+
     private suspend fun authorizeInvocation(
         tool: RegisteredMcpTool,
         args: McpToolArgs,
         policy: McpPolicyAction,
         revocation: Long,
+        escalated: Boolean = false,
     ): Pair<McpApprovalDisposition, String?> =
         when (policy) {
             McpPolicyAction.DENY -> {
@@ -962,6 +1075,12 @@ internal class McpToolRegistryCore(
 
             McpPolicyAction.ALLOW -> {
                 McpApprovalDisposition.AUTO_ALLOWED to null
+            }
+
+            // YOLO answers the prompt, and only the prompt: DENY above, the kill switch and RBAC
+            // are all decided before this branch is reached.
+            McpPolicyAction.ASK if policyEngine.yoloMode.value -> {
+                McpApprovalDisposition.YOLO_ALLOWED to null
             }
 
             McpPolicyAction.ASK -> {
@@ -973,10 +1092,13 @@ internal class McpToolRegistryCore(
                             McpArgumentSanitizer.parseArguments(args.raw),
                             riskAssessment = DefaultMcpRiskEvaluator().evaluateRisk(tool.definition.name, args),
                             declaredReadOnly = tool.definition.readOnly,
+                            toolDescription = tool.definition.description,
+                            policy = policy,
+                            escalated = escalated,
                         )
                 ) {
                     is McpApprovalDecision.Approved -> {
-                        approvedAuthorization(tool, decision, revocation)
+                        approvedAuthorization(tool, onceIfEscalated(tool, decision, escalated), revocation)
                     }
 
                     is McpApprovalDecision.Denied -> {
@@ -1175,10 +1297,31 @@ internal class McpToolRegistryCore(
     }
 
     /** Parse a JSON-object arguments string into a typed [McpToolArgs] of scalars. */
-    private fun parseArgs(arguments: String): McpToolArgs {
-        val map: Map<String, Any?> =
+}
+
+private val mcpArgsJson = Json { ignoreUnknownKeys = true }
+
+/**
+ * The [McpToolArgs] for one invocation's raw JSON [arguments]: a flat map of scalar values, or empty
+ * when the text is not a JSON object. File scope, out of [McpToolRegistryCore], which is at detekt's
+ * LargeClass ceiling.
+ *
+ * The depth guard comes first rather than being left to the catch: a StackOverflowError is only
+ * stopped by that catch because it catches Throwable (see [MAX_MCP_ARGUMENT_DEPTH]).
+ */
+// Any failure to read the arguments must mean "no arguments", never a failed invoke; this catch was
+// baselined while it lived in McpToolRegistryCore.parseArgs.
+@Suppress("TooGenericExceptionCaught")
+internal fun parseMcpToolArgs(
+    arguments: String,
+    logger: ComponentLogger,
+): McpToolArgs {
+    val map: Map<String, Any?> =
+        if (mcpJsonNestingExceeds(arguments)) {
+            emptyMap()
+        } else {
             try {
-                (json.parseToJsonElement(arguments) as? JsonObject)
+                (mcpArgsJson.parseToJsonElement(arguments) as? JsonObject)
                     ?.mapValues { (_, el) -> scalarOf(el) }
                     ?: emptyMap()
             } catch (t: Throwable) {
@@ -1189,26 +1332,26 @@ internal class McpToolRegistryCore(
                 )
                 emptyMap()
             }
-        return McpToolArgs(map, arguments.ifBlank { "{}" })
-    }
+        }
+    return McpToolArgs(map, arguments.ifBlank { "{}" })
+}
 
-    /** Convert a JSON element to a Kotlin scalar; nested objects/arrays become their raw JSON. */
-    private fun scalarOf(el: JsonElement): Any? =
-        when {
-            el is JsonNull -> {
-                null
-            }
+/** Convert a JSON element to a Kotlin scalar; nested objects/arrays become their raw JSON. */
+private fun scalarOf(el: JsonElement): Any? =
+    when {
+        el is JsonNull -> {
+            null
+        }
 
-            el is JsonPrimitive -> {
-                if (el.isString) {
-                    el.content
-                } else {
-                    el.booleanOrNull ?: el.longOrNull ?: el.doubleOrNull ?: el.content
-                }
-            }
-
-            else -> {
-                el.toString()
+        el is JsonPrimitive -> {
+            if (el.isString) {
+                el.content
+            } else {
+                el.booleanOrNull ?: el.longOrNull ?: el.doubleOrNull ?: el.content
             }
         }
-}
+
+        else -> {
+            el.toString()
+        }
+    }
