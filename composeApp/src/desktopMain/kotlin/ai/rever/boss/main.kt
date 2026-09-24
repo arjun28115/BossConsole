@@ -24,6 +24,7 @@ import ai.rever.boss.logging.GlobalLogCapture
 import ai.rever.boss.performance.MemoryPressureWatchdog
 import ai.rever.boss.performance.PerformanceMonitor
 import ai.rever.boss.plugin.PluginStoreSetup
+import ai.rever.boss.plugin.launchpad.DevPluginReloader
 import ai.rever.boss.plugin.sandbox.PluginExecutionBoundary
 import ai.rever.boss.plugin.sandbox.ui.PluginCrashInterceptor
 import ai.rever.boss.plugin.sandbox.ui.PluginCrashRegistry
@@ -74,6 +75,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import java.awt.Window
 import javax.swing.JPopupMenu
 import kotlin.system.exitProcess
@@ -155,7 +157,20 @@ private fun containRenderFault(
     val outcome = PluginRenderRecovery.onUnattributedRenderException(throwable)
     // Shared with the seam test so both exercise the same pairing — see
     // noteRecoveryOutcome.
-    val madeProgress = noteRecoveryOutcome(policy, outcome)
+    val recoveryEffect = noteRecoveryOutcome(policy, outcome)
+    if (outcome !is PluginRenderRecovery.Outcome.Unexplained &&
+        outcome !is PluginRenderRecovery.Outcome.NotPluginRelated &&
+        !recoveryEffect.faultRefunded
+    ) {
+        logger.warn(
+            LogCategory.UI,
+            "Render recovery allowance expired - fault remains counted",
+            mapOf(
+                "outcome" to outcome::class.simpleName.orEmpty(),
+                "recentFailures" to policy.recentFailureCount().toString(),
+            ),
+        )
+    }
 
     // Telling the user and un-counting the fault are separate decisions; every
     // attempt to derive one from the other has regressed the other. The toaster
@@ -166,7 +181,7 @@ private fun containRenderFault(
     // The repaint stays on progress only: it is a full sweep of every window, and
     // during a storm it arguably feeds the fault it is responding to. Nothing to
     // repaint for a verdict that changed nothing.
-    if (madeProgress) {
+    if (recoveryEffect.visibleProgress) {
         Window.getWindows().forEach { it.repaint() }
     }
 }
@@ -227,6 +242,9 @@ fun main(args: Array<String>) {
     ChromiumFlagsSettingsManager.applyToSystemProperties()
     ai.rever.boss.config.SwipeNavSettingsManager
         .publish()
+    // Start release detection before the browser plugin's home surface can receive gestures.
+    ai.rever.boss.plugin.browser.MacOSScrollGesturePhases
+        .ensureStarted()
     ai.rever.boss.config.AutoPipSettingsManager
         .publish()
 
@@ -341,6 +359,8 @@ fun main(args: Array<String>) {
     PasskeyPlatformInit.initialize()
     SettingsSearchIndex.registerWithGlobalSearch()
     PluginStoreSetup.initialize()
+    ai.rever.boss.plugin.packs.PluginPacks
+        .registerMcpTools()
 
     startupScope.launch {
         AppUpdateRealtimeService.instance.apply {
@@ -356,7 +376,18 @@ fun main(args: Array<String>) {
     ai.rever.boss.components.plugin.DefaultPlugin.Companion.loadPersistedPluginsInternal = { manager ->
         PluginStoreSetup.loadPersistedPlugins(manager)
     }
+    val defaultCheck = ai.rever.boss.components.plugin.DefaultPlugin.Companion.isAuthoritativeSystemPlugin
+    ai.rever.boss.components.plugin.DefaultPlugin.Companion.isAuthoritativeSystemPlugin = { pluginId ->
+        defaultCheck(pluginId) || PluginStoreSetup.isSystemPluginId(pluginId)
+    }
 
+    // Set up single-instance development reload handler
+    SingleInstanceManager.pluginReloadHandlerOverride = { pluginId ->
+        runBlocking {
+            DevPluginReloader.reload(pluginId).getOrThrow()
+            true
+        }
+    }
     GlobalLogCapture.start()
     ResourceModeConfig.publishToPlugins()
 
@@ -381,6 +412,23 @@ fun main(args: Array<String>) {
             "os" to "${System.getProperty("os.name")} ${System.getProperty("os.version")}",
         ),
     )
+
+    // Configure MCP workspace tool window creator
+    ai.rever.boss.mcp.WorkspaceMcpToolProvider.windowCreator = { WindowManager.createNewWindow().id }
+
+    // Both sources are desktop-only; the provider is commonMain, so it reads them
+    // through suppliers wired here - the same shape as windowCreator above.
+    ai.rever.boss.mcp.IntrospectionMcpToolProvider.healthSupplier = {
+        ai.rever.boss.health
+            .WorkspaceHealthCollector()
+            .collect()
+    }
+    ai.rever.boss.mcp.IntrospectionMcpToolProvider.performanceSupplier = {
+        ai.rever.boss.mcp.PerformanceReading(
+            snapshot = ai.rever.boss.performance.PerformanceMonitor.currentSnapshot.value,
+            health = ai.rever.boss.performance.PerformanceMonitor.currentHealth.value,
+        )
+    }
 
     // Create initial window BEFORE application{} to prevent auto-recreation
     if (!chromiumNeedsDownload) {

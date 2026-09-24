@@ -56,6 +56,8 @@ fun HeavyweightModal(
     // dismisses on Escape and on its own scrim - only the focus-loss path is suppressed.
     val dismissOnFocusLoss = LocalDismissModalOnFocusLoss.current
 
+    TrackHeavyweightModal()
+
     Window(
         onCloseRequest = onDismissRequest,
         state = state,

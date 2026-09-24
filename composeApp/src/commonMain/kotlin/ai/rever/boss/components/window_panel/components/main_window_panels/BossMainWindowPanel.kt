@@ -950,7 +950,8 @@ fun BossTabsComponent.rememberTabBarState(
                                     ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo(
                                         id = "fluck-$timestamp",
                                         typeId = FluckTabType.typeId,
-                                        _title = "Loading...",
+                                        _title =
+                                            if (FluckTabInfo.isHomeUrl(path)) FluckTabInfo.HOME_TITLE else "Loading...",
                                         url = path,
                                     )
                                 placeNewTab(fluckTab)
@@ -1501,7 +1502,7 @@ fun BossTabsComponent.BossMainPanelContent(modifier: Modifier) {
                             ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo(
                                 id = "fluck-$timestamp",
                                 typeId = FluckTabType.typeId,
-                                _title = "Loading...",
+                                _title = if (FluckTabInfo.isHomeUrl(path)) FluckTabInfo.HOME_TITLE else "Loading...",
                                 url = path,
                             )
                         val tabIndex = addTab(fluckTab)
@@ -2497,8 +2498,9 @@ class BossTabsComponent(
         }
     }
 
-    // Close the most recently opened tab (used for auto-closing download redirects)
-    fun closeMostRecentTab() {
+    // Close the most recently opened tab (used for auto-closing download redirects).
+    // Returns whether a tab was closed, so a batch close can stop instead of assuming.
+    fun closeMostRecentTab(): Boolean {
         val tabs = tabsState.value.tabs
         if (tabs.isNotEmpty()) {
             val lastIndex = tabs.size - 1
@@ -2507,9 +2509,10 @@ class BossTabsComponent(
             // (setupDownloadTabCloseCallback), the same automatic closure as closeTabByUrl.
             // The user did not close it, and reopening would re-run the download.
             removeTab(lastIndex, recordForReopen = false)
-        } else {
-            bossMainWindowPanelLogger.debug(LogCategory.UI, "No tabs to close")
+            return true
         }
+        bossMainWindowPanelLogger.debug(LogCategory.UI, "No tabs to close")
+        return false
     }
 
     /**

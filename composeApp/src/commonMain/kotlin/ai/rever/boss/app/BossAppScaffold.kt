@@ -3,6 +3,7 @@ package ai.rever.boss.app
 import ai.rever.boss.components.bars.horizontal.BossBottomBar
 import ai.rever.boss.components.bars.horizontal.BossTitleBar
 import ai.rever.boss.components.bars.horizontal.BossTopBar
+import ai.rever.boss.components.bars.horizontal.setupKeepsBottomBarVisible
 import ai.rever.boss.components.bars.isBarVisible
 import ai.rever.boss.components.bars.vertical.BossLeftSideBar
 import ai.rever.boss.components.bars.vertical.BossRightSideBar
@@ -60,6 +61,7 @@ import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.services.bookmarks.BookmarkAPIAccess
 import ai.rever.boss.updater.UpdateAvailableDialog
 import ai.rever.boss.updater.UpdateBanner
+import ai.rever.boss.updater.UpdateDialogGate
 import ai.rever.boss.updater.UpdateState
 import ai.rever.boss.updater.drawsBanner
 import ai.rever.boss.updater.rememberUpdateDialogOwnership
@@ -263,6 +265,7 @@ internal fun BossAppScaffold(
     appearance: WindowAppearanceSettings,
     onToggleMaximize: (() -> Unit)?,
 ) {
+    val setupNeedsBottomBar = setupKeepsBottomBarVisible()
     val coroutineScope = state.coroutineScope
     val splitViewState = state.splitViewState
     val selectedProject by state.windowProjectState.selectedProject.collectAsState()
@@ -571,7 +574,13 @@ internal fun BossAppScaffold(
                 val showUpdateDialog by updateHandle.showUpdateDialog.collectAsState()
                 val isUpdateDialogOwner = rememberUpdateDialogOwnership(state.windowId)
                 val updateStateForDialog = updateState
-                if (showUpdateDialog && isUpdateDialogOwner && updateStateForDialog is UpdateState.UpdateAvailable) {
+                UpdateDialogGate(
+                    wantDialog = showUpdateDialog,
+                    isOwner = isUpdateDialogOwner,
+                    updateAvailable = updateStateForDialog is UpdateState.UpdateAvailable,
+                ) {
+                    // Re-test for the smart cast inside the gated content.
+                    if (updateStateForDialog !is UpdateState.UpdateAvailable) return@UpdateDialogGate
                     UpdateAvailableDialog(
                         updateInfo = updateStateForDialog.updateInfo,
                         onUpdateNow = {
@@ -897,9 +906,9 @@ internal fun BossAppScaffold(
                     }
                 }
 
-                // Bottom bar - hidden in focus mode with smooth expand/shrink animation
+                // Setup retains a visible home and its reopened dialog, including in focus mode.
                 AnimatedVisibility(
-                    visible = appearance.showBottomBar && reveal.showBottomBar,
+                    visible = shouldShowBottomBar(setupNeedsBottomBar, appearance.showBottomBar, reveal.showBottomBar),
                     enter =
                         expandVertically(
                             expandFrom = Alignment.Bottom,
@@ -949,6 +958,12 @@ internal fun BossAppScaffold(
         }
     }
 }
+
+private fun shouldShowBottomBar(
+    setupNeedsBottomBar: Boolean,
+    configuredVisible: Boolean,
+    focusModeRevealed: Boolean,
+): Boolean = setupNeedsBottomBar || (configuredVisible && focusModeRevealed)
 
 /**
  * Which plugin panel column takes the host's actions, or null when the right one is shut.

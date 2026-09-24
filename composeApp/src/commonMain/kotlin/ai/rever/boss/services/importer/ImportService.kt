@@ -68,7 +68,7 @@ object ImportService {
 
                 val blocked =
                     when {
-                        website.isEmpty() || isNonWebEntry(entry.website) -> SkipReason.MISSING_URL
+                        website.isEmpty() || isNonWebPasswordEntry(entry.website) -> SkipReason.MISSING_URL
 
                         // Chrome stores logins with an empty username_value.
                         // The CSV path pre-skips these; without the same check
@@ -177,14 +177,6 @@ object ImportService {
 
         return host?.lowercase()?.removePrefix("www.") ?: trimmed
     }
-
-    /**
-     * Entries a browser stores for native apps rather than web pages.
-     *
-     * Chrome exports rows like `android://<hash>@com.example`; they have no host
-     * and could never be autofilled, so importing them adds noise only.
-     */
-    private fun isNonWebEntry(raw: String): Boolean = raw.trim().startsWith("android://", ignoreCase = true)
 
     // ==================== Bookmarks ====================
 

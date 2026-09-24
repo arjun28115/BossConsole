@@ -71,6 +71,28 @@ For a bottom split use `panel: horizontal_split`. Reuse a pane across calls by p
 - Supabase + Edge Functions
 - BossTerm for terminal integration (bundled in the `terminal-tab` plugin)
 
+## Remote UI property patches are tri-state
+
+`WidgetDiffEngine` must distinguish three operations on a widget property: leave it alone, set it
+to a string, and remove it. An empty string cannot mean removal. It is a valid value for text,
+labels, selections and event ids, and the builder emits both omitted optional properties and
+present empty required properties.
+
+`DiffOperation.NodeUpdated.changedProperties` therefore carries assignments, while
+`removedProperties` carries deletes. The wire mirrors that split through additive
+`NodeUpdated.removed_properties`
+field 4, introduced with IPC 1.2.0. `apply` removes first and then applies changed values, so an
+explicit set wins if a malformed or hand-built patch names one key in both collections. Encoders
+sort removed keys for deterministic bytes. Older receivers safely ignore field 4; they retain a
+stale property until a full tree arrives, which is the existing failure rather than a new one.
+
+`NodeUpdated` is a manually implemented plain class rather than a data class now because
+`boss-ui-sdk` is published to external runtimes. Keep its original three-argument constructor,
+`component1` through `component3`, `copy`, and generated `copy$default` JVM descriptors. New code
+that needs to alter the removal set uses the four-argument constructor or
+`copyWithRemovedProperties`. `WidgetDiffEngineTest` reflects the old descriptors so a refactor
+cannot silently break an already-built runtime.
+
 ## Plugin dependencies are resolved at install time
 
 `plugin.json` `dependencies` used to be read in exactly one place -
@@ -209,6 +231,17 @@ stops at the first failure, leaving what came before it. The dependency still lo
 manager directly rather than `loadPlugin`, and for the same reason as before: answering one
 question must never produce a second dialog. What changed is that the first question now covers
 the whole closure, where it used to cover one plugin and stay silent about the rest.
+
+A plugin pack consents through `pack_plan` rather than this dialog, and the same rule holds:
+`pack_plan` resolves each install's closure with the same `planFor` and returns the extra ids as
+`alsoInstalls`, with `closureComplete: false` plus `unresolved`, `cyclic` or `truncated` when the
+walk could not see all of it. `pack_apply` installs the order its own fresh plan resolved and is
+handed that order rather than re-walking the store, so the installs cannot exceed the closure
+that apply's own plan resolved - a walk repeated at install time could follow store rows that
+changed in between. That bounds the install to the plan, not to what the operator saw: the
+`pack_apply` approval dialog shows the raw pack arguments, so a direct `pack_apply` with no
+earlier `pack_plan` has no closure in its consent. Showing the closure in that dialog is a
+recorded follow-up.
 
 Three properties of the plan are worth knowing before touching it. The plugin the user was asked
 about is always in the plan and always last, even if it turns out to be present, because the
@@ -531,6 +564,11 @@ null for every plugin, silently - that has happened before with `mcpToolRegistry
 implementation lives in `desktopMain` (it speaks HTTP), so `DefaultPlugin` reads it through
 `BrokeredCredentialAccess`, a commonMain holder that `main.kt` populates at startup.
 
+It happened a second time with `registerSearchProvider`: neither wrapper forwarded it, so no
+plugin's search provider ever reached global search. `PluginContextWrapperForwardingTest` now
+fails when either wrapper does not declare a `PluginContext` member. It matches by name, so it
+cannot tell a wrong forward from a right one, and a third wrapper has to be added to it.
+
 ### AI credentials are not configured here
 
 `OPENAI_API_KEY` used to be listed above as a `local.properties` key that enabled AI
@@ -738,6 +776,25 @@ the next managed-profile creation. This is not a guaranteed shutdown flush. This
 is not an engine-abort mechanism and does not coordinate external raw-JxBrowser
 callers or engine-level forced closure.
 
+## JxBrowser's native libraries swap the process's malloc zones when they load
+
+On macOS each of JxBrowser's JNI libraries (`libtoolkit`, `libipc`, `libawt_toolkit`) makes
+PartitionAlloc the default malloc zone in a static initializer, briefly unregistering the system
+zone; a `free()` on another thread in that gap is an uncatchable SIGTRAP. `ChromiumToolkitPreload`
+loads the first two on the main thread before the engine pre-warm. Its KDoc is the canonical
+account (mechanism, measurements, what it does not cover); keep it there rather than here.
+
+Rules for anyone touching it:
+
+- **Preload only from the directory `FluckEngine.resolveEngineDir` boots**, or the library loads
+  twice from two paths and swaps zones twice.
+- **JxBrowser must stay in the host class loader.** A plugin that bundled JxBrowser would get
+  `already loaded in another classloader` for a library the host preloaded.
+- **Known gaps:** `libawt_toolkit` is not preloaded (it links `libjawt` and must follow AWT), and
+  a first-run download-then-boot gets no preload. Off switch: `BOSS_TOOLKIT_PRELOAD=false`.
+- **Re-measure after a JxBrowser bump.** The offsets in the KDoc are for 9.5.0 / Chromium
+  152.0.7977.65; check the zone swap still sits in a static initializer before trusting them.
+
 ## Browser telemetry, and how to turn it off
 
 The integrated browser reports which sites BOSS is used with and how - page views,
@@ -768,6 +825,9 @@ restart. There is no Settings row and no per-site exclusion.
   `window.__bossInteractionStarted`. The sanitizers bound what can be *smuggled*
   through; nothing bounds a site lying about its own usage. Treat these as
   indicative, not as measurements, wherever a site has an incentive to lie.
+- **A page can observe the current trackpad gesture token.** The injected swipe bridge exposes
+  the process-wide contact id and begin epoch while fingers are down. It does not expose deltas,
+  but a page can poll the bridge and infer that a trackpad contact is active.
 - **Every project the user opens is now on the bus, not only plugin-initiated ones.**
   `ProjectChangeEvent` used to be published from `ProjectDataProviderImpl.selectProject`
   alone, so a path reached plugins only when a plugin had asked for the switch. It is
@@ -777,8 +837,12 @@ restart. There is no Settings row and no per-site exclusion.
   bridge. Project paths routinely contain usernames, so this widens *when* a filesystem
   path reaches every installed plugin, not *what* - the same install-time-gating stance
   as the bus above applies. In particular, `boss://` links can originate outside BOSS and
-  every non-terminal deep link currently bypasses `DeepLinkOrigin` confirmation, so an
+  a deep link that would start a terminal command, and a plugin action link, consult
+  `DeepLinkOrigin`; project/file deep links still do not, so an
   externally opened project link can trigger this broadcast without operator confirmation.
+  Plugin action links are the exception: external and in-process-plugin requests are held for
+  confirmation before their registered handler runs, including when they arrive before any
+  window exists, in which case they wait for the first one.
   It is recorded here because this paragraph is the canonical list of what a third-party
   plugin can observe.
 - **`PluginContext.projectSearchProvider` is the first UNGATED WRITE surface.**
@@ -794,7 +858,8 @@ restart. There is no Settings row and no per-site exclusion.
 
 A two-finger horizontal trackpad swipe navigates back/forward. It is detected **inside the page**
 (`BrowserSwipeNavScript` + `swipe-nav.js`), because under `HARDWARE_ACCELERATED` the browser is a
-native surface and neither Compose nor AWT sees the wheel. JxBrowser's
+native surface and Compose does not see the wheel. JxBrowser's AWT callback sees deltas but has
+already lost the native finger and momentum phases. JxBrowser's
 `enableOverscrollHistoryNavigation` does NOT provide this - measured 2026-08-28, it does nothing for
 a trackpad in either rendering mode, because it is a touchscreen feature.
 
@@ -803,17 +868,35 @@ vertical measured as a path length and horizontal as net displacement. Chrome's 
 are fractions of the trackpad from `NSTouch.normalizedPosition`, which a page cannot see, so those
 carry over as the same fractions of the commit distance.
 
-**It commits at the end of the gesture, not on crossing the commit distance** - and "end of
-gesture" is literally `GESTURE_GAP_MS` (120ms) with no wheel event, because AWT does not surface
-NSEvent's scroll phases and a time gap is the only segmentation signal there is. So it is not
-release: holding past the line and simply STOPPING, fingers still down, commits after 120ms too.
-The window in which reversing still cancels is 120ms of continuous motion, not "until you lift".
-The decision reads the LAST horizontal position, so easing back below the line cancels.
+**It commits on a real CoreGraphics Ended phase, never on an inactivity timeout.** A listen-only
+session event tap assigns each finger sequence an id and accumulates its final point deltas. The
+page latches that id while deciding scroll ownership; only the matching native release can decide.
+A stationary hold therefore remains cancellable indefinitely. Cancelled phases reset without
+navigating, and momentum has no active finger id and is ignored. Native final displacement magnitude is
+authoritative at release (the page chooses direction) so renderer/native queue reordering cannot hide a late easing-back or
+reversal. If Input Monitoring preflight fails the feature fails closed and Settings shows how to
+grant access; this path never requests permission itself. The observer is started off the UI thread
+only while the effective setting is enabled. Disabling cancels claimants immediately and releases
+the native source and tap within the bounded run-loop poll. Re-enabling retries permission/setup;
+run-loop failures cancel the contact, clean up resources and report a distinct failure state.
+Availability reads and browser registration do not start native observation.
 
-That makes `GESTURE_GAP_MS` do three jobs at once: segmenting one gesture from the next, setting a
-floor on commit latency, and (as the minimum possible gap between two gesture ends) bounding
-`SWIPE_NAV_DEBOUNCE_MS` from above. Raising or lowering it touches all three, and
-`BrowserSwipeNavTest` reads it out of the script so the third one fails loudly.
+`boss.browser.swipe.phase` remains compatible: `id:active:beganAtEpochMs[:previousTerminatedAtEpochMs]`
+or `id:ended|cancelled:netX:verticalPath:nativeRejected:reversed`. The fifth terminal field is the
+native reducer's verdict, not the page's. Active publication occurs only at
+contact begin, not on every movement. `boss.browser.swipe.terminals` additionally retains the last
+32 terminal records, separated by semicolons, published before the next active contact. Companion
+fluck-browser#45 reconciles by contact ID both before handling a new wheel and in its watchdog.
+Reads are non-destructive across surfaces; missing/evicted evidence cancels. These deltas are native
+CoreGraphics point deltas, not a guarantee of CSS-pixel or Compose-unit equivalence. Physical
+trackpad calibration still needs to cover browser zoom, slow drags and the separately tuned home
+surface. `SwipeNavParityTest` runs shared sample fixtures through the native reducer and the actual
+page script, including the host-generated release statement; it also pins cancellation constants.
+
+One cross-process ordering limit remains: the cutoff rejects AWT events stamped at or before the
+previous native termination, but cannot identify an old OS event that AWT dispatch stamps only
+after the new contact begins. Arbitrarily delayed dispatch still needs real backlog testing
+before adding a custom FIFO between the CoreGraphics tap and JxBrowser's input callback.
 
 **Past the commit distance, vertical drift stops cancelling** (`reachedCommit`). Vertical is a path
 length and only ever grows, so every event after the crossing was one more chance to cancel a swipe
@@ -822,24 +905,8 @@ easing back or reversing can still cancel. Native swipe-back behaves the same wa
 
 **Two host-side windows, for two different things** (`BrowserSwipeNavBridge.kt`).
 `SWIPE_NAV_DEBOUNCE_MS` (32ms, any direction) catches a double-dispatch bug in the bridge.
-`SWIPE_NAV_REPEAT_MS` (400ms, same direction only) is the paused-drag guard: a slow drag that
-hesitates past `GESTURE_GAP_MS` with the fingers down is two gestures to the script and would
-navigate back twice. That guard cannot live in the page - the first commit navigates the tab and
-the script's state dies with the document. The cost is that two intentional same-direction swipes
-under 400ms apart become one; that is the deliberate trade, because a dropped swipe is retryable
-and an extra step back may not be, since the forward entry need not survive a redirect. A reversal
-is never held for the repeat window.
-
-**Momentum phase costs latency and nothing else.** A `CGEvent` tap on this hardware (measured
-2026-09-02) shows macOS emitting momentum-phase scroll for 180-870ms after the fingers lift,
-carrying 325-2500px of horizontal travel. Whether Chromium forwards those to the renderer as
-`wheel` events is NOT confirmed: if it does, each one re-arms the end-of-gesture timer and a flick
-commits at end-of-momentum instead of at release. It cannot change the ANSWER - a tail runs the
-flick's own direction, so it can neither reverse nor ease back, and `reachedCommit` is what closed
-the remaining path, a tail's `deltaY` tripping the vertical tiers. Synthetic phase-tagged events
-cannot settle the forwarding question - `CGEventPost` from another process never reaches the
-layered native browser surface, and does not even enter the session event stream - so it needs one
-real flick against a recording `wheel` listener.
+`SWIPE_NAV_REPEAT_MS` (400ms, same direction only) remains defense in depth against duplicate
+bridge delivery across a navigation. A reversal is held only for the shorter debounce window.
 
 **Off switch**: `Settings > Browser > Trackpad`, stored in `~/.boss/swipe-nav.json`, or
 `BOSS_BROWSER_SWIPE_NAV=false` (also `0` / `no` / `off`). The environment wins, and the Settings row
@@ -928,11 +995,51 @@ URL produces the same input. Entry points therefore tag each link with a
   Also the default for an unstated origin, so a new caller that forgets to say
   gets the cautious handling.
 
-Only `boss://terminal?command=` consults it today: an `OPERATOR_CLI` command runs
-as before, anything else is shown to the operator for confirmation first (the
-`boss` shell shim converts to a `boss://` URL and opens it via the OS, so its
-`terminal -c` still works, with one confirmation). Other hosts - including
-`boss://plugin?id=…&action=…` - are unchanged.
+Three hosts consult it. The first two share a reason - each can type a command
+into a shell - and the third reaches a plugin's own code instead:
+
+- `boss://terminal?command=`: an `OPERATOR_CLI` command runs as before, anything
+  else is shown to the operator for confirmation first (the `boss` shell shim
+  converts to a `boss://` URL and opens it via the OS, so its `terminal -c` still
+  works, with one confirmation).
+- `boss://workspace?path=`: a Space's terminal tabs run their `initialCommand`
+  when it is applied, so an `EXTERNAL` load of a Space that carries any is held
+  (`spaceLoadDisposition`) and `SpaceLoadApprovalDialog` lists every command
+  before anything loads. A Space with no terminal commands, and the operator's
+  own `boss workspace`, load as before. The origin rides on
+  `CLICommand.LoadWorkspace` through the cold-start readiness queue to
+  `WorkspaceLoadEvent.requiresConfirmation`, because only the window parses the
+  file and so only it knows whether there is anything to confirm.
+- `boss://plugin?id=…&action=…`: the link dispatches into a plugin's registered
+  `DeepLinkActionHandler`, which is a program the operator did not ask to run, so an
+  `EXTERNAL` request is held (`pluginActionDisposition`) and
+  `PluginActionApprovalDialog` shows the handler, the action and the parameter KEYS -
+  never a parameter value, which is attacker-chosen text. Malformed prompt tokens are
+  refused outright.
+
+No other host consults it.
+
+A terminal request with no usable window is refused. A **plugin action** with no usable
+window is instead *retained* by `PluginActionEventBus` until some window claims it, because
+that is the ordinary cold-start path rather than an edge case: `CliBootstrap.dispatchPostLock`
+runs an argv link before `application {}` builds the first window, so refusing there meant a
+link clicked while BOSS was not running was never put to the operator at all. A retained
+request has not run and still cannot run without a confirmation, so this widens nothing. The
+registry is bounded (`MAX_PENDING`); a request arriving when it is full is refused, not
+dropped silently. Every open window is offered every retained request and
+`shouldClaimPluginAction` decides whose it is - the window it resolved to, or any window once
+that one has closed - so exactly one window shows it. A window claims one request at a time,
+only while nothing is on screen (`PluginActionApprovalQueue.canClaim`), as the dependency bus
+does, so every other request stays retained for the next window. Closing a window after its
+prompt appears can still abandon that one claimed request. Because the window's own queue
+holds only the prompt on screen, the prompt's "(n pending)" counts that one plus every request
+still retained on the bus (`pluginActionBacklog`), so a flood of links is visible. The wiring
+lives in `PluginActionApprovalPrompt`, not inline in `BossAppDialogs`, so a test drives the real
+count. A retained request carries no age and does not expire: the registry is bounded and a
+request reaches its handler only through the prompt, so a prompt shown long after the link was
+clicked still fails closed rather than acting on its own. That is a recorded decision, not an
+oversight - a TTL, or the arrival time in the prompt text, would make a late prompt easier for
+the operator to place.
 
 **Single-instance channel**: `SingleInstanceManager` publishes
 `~/.boss/run/single-instance` (owner-only) with the channel endpoint and a token
@@ -941,10 +1048,12 @@ Linux) or a loopback port (Windows). Every request must present the token,
 "another instance is running" means something answered on the channel rather than
 a pid existing, and a descriptor nobody answers on is reclaimed.
 
-A forwarded plugin action (`boss://plugin?id=...&action=...`) is acknowledged
-only when its handler reports true. Missing ids, missing handlers, declined
-and throwing handlers report failure. The channel waits up to five seconds;
-a timeout reports an unknown outcome and cancels dispatch if it is still queued.
+A forwarded operator-origin plugin action (`boss://plugin?id=...&action=...`) is
+acknowledged only when its handler reports true. An external action is acknowledged when
+it is queued for confirmation, before anything runs. Missing ids, refused actions, missing
+handlers, declined and throwing operator-origin handlers report failure. The channel waits
+up to five seconds for a direct dispatch; a timeout reports an unknown outcome and cancels it
+if it is still queued.
 An already-running synchronous handler cannot be interrupted. Startup therefore
 never retries plugin actions automatically, even after a lost response; auth and
 other open requests retain their existing retries. Panel-open links still only
@@ -1135,9 +1244,9 @@ fallback for URL schemes if `Native.load` fails.
 plugin and opens that plugin's panel, exactly as the workspace button already did with
 `open-workspace-picker`; both helpers live in `components/plugin/TopOfMindActions.kt`.
 
-**The panel id is `PanelId("top-of-mind", 5)`, not `PanelIds.TOP_OF_MIND`.** That constant is
+**The panel id is `PanelId("top-of-mind", 5)`.** The removed `TOP_OF_MIND` constant used
 `PanelId("topofmind", 2)` - a different id string from the one the plugin registers - so opening by
-it matches nothing at all, silently. Only the `panelId` and `pluginId` are compared, so the order
+it matched nothing at all, silently. Only the `panelId` and `pluginId` are compared, so the order
 is carried for honesty rather than for matching.
 
 **When `dispatch` returns false there is no fallback dialog, and that is the point.** Falling back
@@ -2021,6 +2130,8 @@ workspace by selecting the tools you need." Tools install app-wide, not into a S
 
 ## Documentation
 
+- [Authenticated IPC rollout](docs/authenticated-ipc-rollout.md): paired runtime release, ownership, and credential lifetime.
+
 - [MCP for agent-less operators](docs/mcp-agentless-operators.md) - Toolbox kill-switches and attach path
 
 - [Core Subsystems](docs/SUBSYSTEMS.md) - Auth, UI, keyboard shortcuts, threading, default applications, runner, BossTerm
@@ -2032,19 +2143,31 @@ workspace by selecting the tools you need." Tools install app-wide, not into a S
 - [Role Creation](docs/ROLE_CREATION_GUIDE.md) - Creating and managing roles
 - [Windows Deep Link](docs/WINDOWS_DEEP_LINK_SETUP.md) - Windows protocol handler setup
 - [Release Rebuild](docs/RELEASE_REBUILD_GUIDE.md) - Re-running release builds
-
-
-
 ### Governed MCP invocation (#371)
 
 The host policy applies to registry invocation; it does not isolate installed JVM
-plugins. Unknown tool names default to ALLOW. Known mutations default to ASK with
+plugins. The mutating gate is a fail-closed OR: the host's name signals - known
+mutating names, then known suffixes - are final, and the provider's own
+`McpToolDefinition.readOnly` declaration is consulted only after them, so a
+`readOnly = false` declaration makes an innocently named tool mutating while a
+`readOnly = true` claim can never launder a name the host already knows (#804).
+`null` preserves the name-only answer bit for bit, which is why existing callers
+compile and behave unchanged. `readOnly` defaults to `true` in the plugin API, so
+this catches an honest plugin declaring side effects and is deliberately not a
+defence against a hostile one that lies. Unknown tool names default to ALLOW while
+the provider declares (or defaults to) `readOnly = true`. Known mutations default to ASK with
 a 45-second timeout. Each queued prompt is delivered to exactly one window and
 window teardown denies its owned request. Session trust is process-wide and can
-be cleared using “Revoke MCP session trust” in the bottom bar; restore the bar if
-it is hidden. The approval dialog offers Always Allow and Always Deny, which save
+be reviewed and revoked per tool (or all at once) from “Session trust” in the bottom bar's MCP access menu; restore the bar if
+it is hidden. Session trust is keyed to the exact provider the operator approved (#815): a same-named
+tool from a different provider gets its own ASK instead of inheriting the grant - the tool-name squat.
+McpSessionTrust keeps the (providerId, toolName) identity the engine uses everywhere else: a name-only
+grant would hand an unvetted plugin the approval its sibling earned, and trusting less than the operator
+meant is the fail-closed direction. Revocation stays name-wide as the operator escape hatch:
+revokeSessionTrust(toolName, providerId = null) still clears every provider's trust for that name, and
+over-removing trust fails closed. The approval dialog's “Always, for this tool” scope (Always allow / Always deny) saves
 a tool-wide rule for all agents and arguments across restarts. Saved rules can be
-reviewed and reset from “Persisted MCP policies” in the bottom bar; a reset removes
+reviewed and reset from “Tool policies” in the bottom bar's MCP access menu; a reset removes
 the rule and clears that tool's session trust, so the tool uses the configured default
 policy (ASK for known mutations in the shipped defaults). Unrelated DENYs remain intact.
 A failed reset keeps the previous durable rule visible and clears the selected session
@@ -2053,9 +2176,9 @@ POLICY_PERSIST_FAILED and withhold the current execution. A queued approval cann
 replace a newer DENY or reset: each reset invalidates older authorizations before their
 final approval boundary, including queued once/session/persistent grants. Calls already
 authorized to execute are not cancelled. Reset remains host UI only, not an MCP tool.
-“Trust This Plugin” persists a provider-wide ALLOW covering every tool that provider
+“Trust plugin” (the “Always, for every tool from this plugin” scope) persists a provider-wide ALLOW covering every tool that provider
 contributes - weaker than an explicit tool-specific rule, reviewed and reset from
-“Trusted plugins” in the bottom bar rather than “Persisted MCP policies”. The same
+“Trusted plugins” in the MCP access menu rather than “Tool policies”. The same
 reset-invalidates-queued-grants guarantee applies to it: the write rechecks the
 prompting tool's and provider's revocation state, plus DENY, under the policy lock, so a reset landing
 while the dialog is open refuses the write and withholds that call instead of persisting
@@ -2064,16 +2187,226 @@ write that fails for a genuine disk error (not a stale-dialog refusal) still run
 already-approved call, falling back to session trust for that one tool only - a
 deliberate asymmetry, since the operator already approved the call in hand and a disk
 fault should not retroactively withhold it.
+The approval dialog asks for a scope once (just this call, this session, always for this tool,
+always for every tool from this plugin) and answers with one Deny / Allow pair whose labels name
+the effect; there is no session or provider-wide deny, so under those scopes Deny reads “Deny
+once”. The bottom bar shows all three consent surfaces (session trust, tool policies, trusted
+plugins) behind one “MCP access” item, badged in the alert colour while session trust is live.
+The "Always, for this tool" scope says in the dialog that it is keyed by tool name, so it also
+covers a replacement plugin shipping a tool of that name - the one place the operator is told.
 Provider trust also covers tools added by later versions and replacement plugins claiming
 that provider id. Already queued sibling prompts still ask. Explicit tool ASK rules
 still override provider ALLOW. The Trusted plugins UI lists ALLOW rules only; hand-edited
 provider DENY rules currently require policy-file editing to remove.
+
+**YOLO mode** makes any call whose policy resolves to ASK run without prompting, for every tool
+and provider, CRITICAL-risk ones and tools registered later included. Any user can turn it on,
+behind one confirmation (`McpYoloConfirmation`, composed per window in `BossAppDialogs` and
+raised through `McpYoloPrompt`), from either of two places: **MCP access → YOLO mode...** in the
+bottom bar, or the **Tools → MCP YOLO Mode** checkbox in the application menu. The menu item is
+not a convenience: the bar can be hidden (`showBottomBar`, and Focus mode hides it by default),
+and a live global bypass must keep an indicator and an off switch that survive that. Its
+checkmark is the indicator and unchecking turns the mode off; in the bar it reads "MCP: YOLO"
+in the alert colour with "Turn off YOLO mode" first in the menu.
+
+- **It replaces only the prompt.** `policyFor` is untouched, so explicit tool or provider DENY,
+  an unreadable policy file, the kill switch and RBAC still refuse first, and a revoke or DENY
+  landing mid-flight still stops the call at `confirmInvocation`. `McpYoloModeTest` drives the
+  real registry to pin this.
+- **In memory only** (`McpPolicyEngine.yoloMode`), off at every launch. Prompts already queued
+  when it is turned on still ask.
+- **Audited in the ledger, both the calls and the switch.** Each call it lets through is
+  `YOLO_ALLOWED` with `policyApplied = ASK`. Turning it on or off writes a `YOLO_ENABLED` /
+  `YOLO_DISABLED` marker (tool `yolo_mode`, provider `host`) through `McpToolRegistryCore
+  .setYoloMode`, so a window in which calls could run unattended is in the hash-chained record
+  even if nothing was invoked. Markers do not count as calls (`countsAsCall = false`), and the
+  bar's last-call line skips them (`isGovernanceEvent`). Always switch through
+  `McpToolRegistryImpl.setYoloMode`, never `policyEngine.setYoloMode` directly, or the marker is
+  lost.
+- **A deployment can refuse it**: `BOSS_MCP_YOLO_DISABLED=true` (also `1` / `yes` / `on`) or
+  `-Dboss.mcp.yolo.disabled=true` hides both entry points and makes turning it on a logged no-op.
+  Read once at startup (`McpYoloGate`). Turning it off is never refused.
+
 Preserve a backup before manual recovery of a damaged policy;
 the fault flow withholds all tools until recovery. No automatic quarantine UI is
 provided. Ledger redaction is bounded and best effort, not a guarantee for secrets
 under arbitrary keys. Queue overflow and cancellation before/after dispatch have
 distinct ledger dispositions. Risk classification from #336 feeds this same policy and approval path; there is
 no second sandbox prompt. Explicit policies and session trust retain precedence.
-HIGH/CRITICAL names use the mutating default, while unknown names remain allowed
+HIGH/CRITICAL risk names use the mutating default alongside catalog-mutating
+and provider-declared mutating names, while everything else remains allowed
 by default. Risk reasons and sanitized arguments appear together in the existing
 approval dialog. #362 is closed pending extraction into a management plugin.
+
+The workspace/terminal lifecycle tools (`WorkspaceMcpToolProvider`: open_workspace,
+create_workspace, open_terminal, close_workspace and their aliases) are declared
+`readOnly = false`, so the ASK default above is their confirmation layer - the role the
+`DeepLinkOrigin` prompt plays for `boss://terminal?command=`. An operator "Always Allow"
+on `open_terminal` therefore runs later invocations unconfirmed, i.e. as strong as an
+unconfirmed external deep link; the command still passes the shape check and the shell
+risk evaluation (HIGH, CRITICAL for destructive patterns) on every call.
+
+## Process log authority and lifetime
+
+Process logs are host-owned infrastructure, not an OS sandbox. Log setup fails closed
+before spawning when the log root crosses an unapproved symlink, the filesystem cannot
+provide persistent Windows ACLs, or the native platform is unsupported. No child is
+started with unprotected fallback logs. Operators must use a supported private local
+log directory; setup failures must not expose credential-bearing environment values.
+
+Each process id shares one rotating writer across overlapping generations. Drain
+lifetimes follow the owned parent, not descendant EOF. After parent exit, each pipe
+drains only its observed remaining snapshot (at most 1 MiB); later descendant output
+is outside this log contract. Closing the read end can give a later descendant write
+EPIPE/SIGPIPE and terminate a native descendant that has not disabled SIGPIPE. Recording failure does not stop draining a live parent's
+output. Idle polling backs off to 100 ms and resets to 1 ms after output, so a busy
+small pipe does not pay a fixed 10 ms delay between batches. Retention is bounded
+per process id, not across all distinct process ids.
+
+**The bottom bar's "MCP: `<tool>`" status line is clickable into an activity log of the last 100
+calls this session.** Before this it was the only visibility into MCP activity at all - every
+call before the current one, and the policy/approval decision behind it, was reachable only by
+opening the rotated ledger file in a text editor. The dialog is a read-only view over
+`McpOperationLedger.recentOperations`, scoped to calls that actually reached the policy engine -
+`McpOperationLedger`'s own KDoc records that an unregistered, unpermitted or kill-switch-disabled
+tool call is refused before that, so this is not a view over every MCP invocation attempt.
+Retention is described as finite and best-effort (the active ledger file plus up to 5 rotated
+backups, and a write failure there is logged rather than retried), not a guarantee older calls
+are still on disk. Unsuccessful calls are broken down by `McpUnsuccessfulCategory` - denied,
+cancelled, withheld (approval queue overflow or a host disk fault that stopped the call from running) or failed - through an exhaustive `when` over `McpApprovalDisposition` rather
+than a `setOf`-based membership check, so a disposition the enum grows later is a compile error
+here rather than silently counted as a tool fault.
+
+This is host UI for now; #416 is where activity/history UI and its ownership are meant to move
+into a dynamic plugin. Should that move happen, the read surface it needs must be
+**host-implemented and permission-gated** (an `mcp.activity.read`-shaped permission, the way MCP
+tool calls already gate on `project.replace` and similar), never a member added to the ungated
+`PluginContext.applicationEventBus`/`projectSearchProvider` surface this file documents elsewhere
+- an ungated ledger read would hand any installed plugin every *other* plugin's tool names,
+sanitized arguments and error snippets, and this file's own sanitizer caveat ("bounded and best
+effort, not a guarantee for secrets under arbitrary keys") is acceptable for an operator-only host
+dialog and not for a cross-plugin observation channel. Until that move happens, keeping this host
+UI is also the stronger guarantee for a second reason: a governance viewer that can be disabled or
+uninstalled by the plugins it governs is weaker than one that ships with the host.
+
+The idle activity entry appears only while MCP tools are exposed (existing history remains reachable).
+The viewer uses the ledger instance's actual optional persistence path. Its tooltip follows the host
+heavyweight overlay route. Width and height follow the originating window, with a fixed-cap fallback
+while window metadata is not yet measured; Close stays outside the scrolling body.
+
+**The "Tool policies" entry of the bottom bar's MCP access menu also lets an operator set a rule
+*proactively*, for a registered tool without a saved rule.** It is present even with zero saved
+rules. Allow requires a second confirming tap
+and shows the tool's risk assessment first, the same way the approval dialog's own
+"Always Allow" does, since it is the same durable, tool-name-wide grant. The write goes
+through `McpPolicyEngine.setToolPolicyIfAbsent`, not the reactive approval path's
+`setToolPolicy` - the proactive contract is "add a rule only while this tool still has
+none of its own," and `expectedRevocation`/`providerId` (captured when the tool was
+offered as a candidate, via `mcpProactivePolicyCandidates` /
+`McpToolIdentity.expectedRevocation`) alone cannot enforce that: `revocationVersion`
+only moves on a revoke, so an intervening explicit ASK or ALLOW made through the
+reactive approval dialog for this same tool never trips it, and a `preserveDeny`-style
+guard would let the proactive write silently clobber that decision. `setToolPolicyIfAbsent`
+re-checks `toolName !in rules` under the same lock the write itself takes, atomically, so
+any rule present at write time - not only a DENY - refuses the write instead. The same
+lock also refuses provider DENY and unreadable-policy faults, preserving damaged files
+for manual recovery. Refused writes refresh candidates and require a fresh confirmation;
+storage failures get separate feedback. Stable DENY and damaged-file refusals are explained
+inside the dialog, including backup/recovery guidance. Confirmation is tied to the full candidate snapshot.
+These privileged writes remain beside host policy enforcement. #416 tracks the separate
+observation/plugin architecture; this PR does not expose a policy writer to plugins.
+
+The MCP tool policies dialog also groups currently registered, enabled tools by
+provider into sections. All allows the section, View selects tools declared
+read-only except names the mutating catalog rejects - the same single `isMutating` call the invoke
+gate uses, so section buckets and the gate can never disagree - and HIGH/CRITICAL risk tools,
+Edit selects the remaining
+tools, and Custom uses individual checkboxes. Applying a preset denies tools
+outside its selection; existing tool rules are replaced only after the operator
+confirms the displayed counts and scope. These are explicit tool-name rules,
+not provider trust: future tools are not automatically granted access.
+`McpPolicyEngine.setSectionPolicies` writes the reviewed section atomically,
+checks every prior rule and tool/provider revocation stamp, refuses provider DENY
+and unreadable policy files, and invalidates queued grants after a
+successful save, dropping session trust only for the (providerId, toolName)
+pairs the write changed (#815); other providers' same-named grants survive.
+Keep these checks when changing section UI; sequential calls to
+`setToolPolicy` would permit partial application and stale overwrites. Individual
+reset controls remain available below the sections.
+
+The section/global confirmation UI uses the same default-risk evaluator as the
+engine. HIGH/CRITICAL grants and replacements of an existing DENY display each
+tool's risk and require Review followed by Confirm. Failed writes retain the
+staged choices and retry action; successful or stale writes refresh revocation
+snapshots. Current saved rules (including ASK/default) are visible in expanded
+rows, and the summary distinguishes rules being replaced from new denials.
+Global None is a distinct deny-all preset, not Custom; Edit is the label at both
+levels. Search by plugin display name also matches its saved tool rules.
+
+## Process-wide plugin registrations belong to window lifetimes
+
+`DefaultPlugin` routes MCP/search providers, panel menus, settings pages, deep-link actions,
+shortcut providers and status-bar items through `WindowRegistrations`. The newest window's
+registration serves every window; unregistering it restores the newest surviving owner.
+Disabling or dynamically unregistering in one window therefore leaves another window's
+registration available. Per-window action dispatch is not implemented by this arbitration.
+
+Each window has a lifetime token. Release fences later registrations and snapshots admitted
+slots under a short owner lock; publication checks the fence under its slot lock. Plugin
+callbacks never run under the owner lock, and disposal does not wait on unowned slots.
+Restoring a shared id re-queries tools()/shortcuts() on the closing thread, so a slow surviving
+provider can delay that close. Replacement warnings and snapshot-at-registration semantics
+are intentional. Global access filters still apply independently of registration ownership.
+
+### Plugin Dev Staging & Launchpad Invariants
+
+- **Protected Plugins Overrule Dev JARs Unconditionally**:
+  When deduplicating or resolving dev vs. standard plugins, `isSystemPlugin` and `requiresRestartInsteadOfHotReload` plugins MUST NEVER be superseded by a dev JAR, regardless of file modification timestamps (`lastModified`). Never rely solely on additive bonuses (`versionBonus + lastModified`) without penalizing or filtering dev JARs on protected identities.
+
+- **Reload Forward & Rollback State Completeness**:
+  Hot-reload must support both active (`LOADED`) and inactive (`DISABLED`) plugins symmetrically:
+  - If a plugin was disabled prior to reload (`wasEnabled = false`), forward reload must install with `enabled = false` and accept `state == DISABLED` as an expected successful outcome.
+  - If the active user lacks RBAC permissions, forward reload must accept `state == DISABLED && !canAccess(manifest)` as a valid outcome.
+  - Rollback must restore `wasEnabled = false` and reinstall `v1.jar` in `DISABLED` state without uninstallation.
+
+- **Archive Traversal & Stream Bounds**:
+  Never trust `ZipEntry.size` alone for decompression limits, as `size == -1` in streaming ZIPs. Always enforce hard byte caps on the incoming `InputStream` (e.g. `readNBytes(MAX + 1)` or explicit counter bounds) to prevent heap exhaustion.
+
+- **Test Veracity Rules**:
+  - In deduplication tests, ALWAYS test with dev JAR `lastModified` strictly greater than standard JAR `lastModified` to mirror real-world compiler outputs.
+  - Test the public reload pipeline (`DevPluginReloader.reload`) end-to-end rather than calling internal rollback helpers in isolation.
+
+### Health snapshots and intentional disables
+
+Sandbox disabled state alone is not evidence of watchdog failure: operator disable
+and failed registration also set it. `pluginHealthSnapshot` derives watchdog stops
+only from otherwise healthy rows and shares that set with row decoration and CLI
+findings. Manager errors take precedence over disabled state, so a failed
+registration stays visible while an ordinary disabled plugin is not degraded.
+
+Password import and secret request validation reject empty passwords, not
+whitespace-only passwords: whitespace can be the original credential. Never trim
+password values. Bitwarden JSON null encryption flags are treated like an absent
+flag; true or malformed non-null values remain rejected. KeePass format sniffing
+inspects at most 4096 characters; full XML parsing still enforces its own limits.
+
+Dev reload resolves staged JARs with manifest identity validation, matching startup.
+The scaffold wrapper source/hash is recorded in `resources/launcher/README.md`;
+update it with the pinned distribution checksum and scaffold validation together.
+
+### Dev #935 persistence and audit contracts
+
+- MCP ledger hashes detect retained-record edits and broken adjacency, not authenticity: no secret key is used, and complete rewrites or tail truncation are not detectable. Ledger files are owner-only. `boss mcp ledger verify|tail|search` reads local disk; it is not an ungated plugin MCP read surface.
+- `atomicWriteText` pins POSIX files to 0600. The separate `writeModeFile` writer for `env_vars` preserves existing permissions; that rule does not apply to all state writers.
+- Chromium's constructed GitHub backup URL uses the catalog checksum. Primary and backup must contain identical artifact bytes; checksum mismatch fails closed. See `docs/dev-935-release-checklist.md` for deployment checks.
+- Browser print is a direct-native exception to the usual AWT ownership rule after macOS manual verification. Pending AWT cancellation is best-effort, not a cross-thread exactly-once guarantee; do not copy this pattern for destructive actions.
+
+### Run scan publication ownership
+
+Run configurations retain a process-wide detected list. Scans from different windows may
+overlap, but only the latest request owns its results, error, and busy state. A short
+`scanLock` protects ownership and publication, never filesystem traversal. `clearDetected`
+invalidates pending publication and clears scan status; it does not cancel detector work.
+Cancellation propagates without becoming a scan error. The internal scanner overload lets
+`RunConfigurationScanOwnershipTest` control completion order on the real manager without
+mutating a global detector or reading a user's project.

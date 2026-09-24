@@ -24,8 +24,8 @@ import kotlinx.coroutines.flow.flow
  * [createBrowserTab] to force the browser to navigate to an arbitrary URL, or [closeTab]/
  * [selectTab] to manipulate what the user is looking at.
  *
- * These guards protect this service only. SplitView and ProjectData still expose unguarded
- * operations on the same server; BossConsole#53 tracks the remaining IPC surface.
+ * These guards protect this service only. BossConsole#53 tracks the remaining unguarded
+ * services on this server.
  */
 // One method per RPC the generated service base class declares, plus small identity and audit helpers.
 @Suppress("TooManyFunctions")

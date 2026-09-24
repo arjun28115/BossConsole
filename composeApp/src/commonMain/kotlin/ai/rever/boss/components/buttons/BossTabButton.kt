@@ -2,6 +2,7 @@ package ai.rever.boss.components.buttons
 
 import ai.rever.boss.components.model.TabDraggableComponent
 import ai.rever.boss.components.model.TabDropResult
+import ai.rever.boss.components.model.detectTabDragGestures
 import ai.rever.boss.components.overlays.ContextMenu
 import ai.rever.boss.components.overlays.ContextMenuItem
 import ai.rever.boss.components.overlays.OverlayConfig
@@ -14,7 +15,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
@@ -196,8 +196,12 @@ fun BossTabButton(
             // browser's heavyweight surface, so a tab tooltip over a browser tab would
             // be hidden by the page. Show it in a small native window instead.
             // OFF_SCREEN keeps the Compose path below unchanged.
-            DisposableEffect(fileName) {
+            // A terminal's activity indicator can change its title while the pointer stays
+            // still. Refresh the existing native window without hiding it between titles.
+            LaunchedEffect(fileName, heavyweightTooltip) {
                 heavyweightTooltip(fileName)
+            }
+            DisposableEffect(Unit) {
                 onDispose { OverlayConfig.hideHeavyweightTooltip?.invoke() }
             }
         } else {
@@ -389,8 +393,9 @@ fun BossTabButton(
                 }.then(
                     if (isDragEnabled) {
                         Modifier.pointerInput(tabInfo, panelId, tabIndex) {
-                            detectDragGestures(
-                                onDragStart = { offset ->
+                            detectTabDragGestures(
+                                component = tabDragComponent,
+                                onStart = { offset ->
                                     // Calculate absolute position for drag start
                                     val absolutePosition = windowPosition + offset
                                     tabDragComponent.startDragging(
@@ -401,18 +406,7 @@ fun BossTabButton(
                                     )
                                     onDragStart()
                                 },
-                                onDrag = { change, dragAmount ->
-                                    change.consume()
-                                    tabDragComponent.updateDrag(dragAmount)
-                                },
-                                onDragEnd = {
-                                    // Always clean up drag state first to prevent stuck ghost
-                                    val result = tabDragComponent.endDrag()
-                                    onDragEnd(result)
-                                },
-                                onDragCancel = {
-                                    tabDragComponent.cancelDrag()
-                                },
+                                onEnd = onDragEnd,
                             )
                         }
                     } else {

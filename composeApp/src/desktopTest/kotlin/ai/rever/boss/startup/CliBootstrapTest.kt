@@ -10,6 +10,7 @@ class CliBootstrapTest {
     fun isHeadlessCliRecognizesStandardCommands() {
         assertTrue(CliBootstrap.isHeadlessCli(arrayOf("status")))
         assertTrue(CliBootstrap.isHeadlessCli(arrayOf("STATUS")))
+        assertTrue(CliBootstrap.isHeadlessCli(arrayOf("doctor")))
         assertTrue(CliBootstrap.isHeadlessCli(arrayOf("mcp")))
         assertTrue(CliBootstrap.isHeadlessCli(arrayOf("completion")))
         assertTrue(CliBootstrap.isHeadlessCli(arrayOf("--help")))

@@ -110,7 +110,6 @@
     <ID>CyclomaticComplexMethod:BrowserFunctions.kt$private fun configureBrowserPopupHandler( browser: Browser, onOpenInNewTab: (String) -&gt; Unit, )</ID>
     <ID>CyclomaticComplexMethod:BrowserHandleImpl.kt$BrowserHandleImpl$@OptIn(ExperimentalComposeUiApi::class) @Composable override fun Content()</ID>
     <ID>CyclomaticComplexMethod:BrowserHandleImpl.kt$BrowserHandleImpl$override fun dispatchCoBrowseInput(inputJson: String)</ID>
-    <ID>CyclomaticComplexMethod:BrowserHandleImpl.kt$BrowserHandleImpl$private fun getFormFieldInfoFromJS(frame: com.teamdev.jxbrowser.frame.Frame): FormFieldInfo?</ID>
     <ID>CyclomaticComplexMethod:BrowserHandleImpl.kt$BrowserHandleImpl$private fun jsKeyToKeyCode( key: String, code: String, ): KeyCode</ID>
     <ID>CyclomaticComplexMethod:BrowserHandleImpl.kt$BrowserHandleImpl$private fun setupEventListeners()</ID>
     <ID>CyclomaticComplexMethod:BrowserHandleImpl.kt$BrowserHandleImpl$private fun setupPopupHandler()</ID>
@@ -140,7 +139,6 @@
     <ID>CyclomaticComplexMethod:EditorContentProviderImpl.kt$EditorContentProviderImpl$override fun detectLanguage(filePath: String): String</ID>
     <ID>CyclomaticComplexMethod:EmailAuthService.kt$EmailAuthService$suspend fun verifyMagicLinkToken( token: String, email: String? = null, type: String = "magiclink", ): Result&lt;Boolean&gt;</ID>
     <ID>CyclomaticComplexMethod:EmptyContentScreen.kt$@Composable private fun Card( icon: ImageVector, title: String, description: String, isSelected: Boolean, enabled: Boolean, onClick: () -&gt; Unit, modifier: Modifier = Modifier, )</ID>
-    <ID>CyclomaticComplexMethod:FileIndexer.kt$FileIndexer$private fun scanDirectory( dir: File, rootCanonicalPath: String, rootPathLength: Int, files: MutableList&lt;IndexedFile&gt;, depth: Int = 0, )</ID>
     <ID>CyclomaticComplexMethod:FileNameSanitizer.kt$FileNameSanitizer$fun sanitize( fileName: String, replacement: Char = '_', ): String</ID>
     <ID>CyclomaticComplexMethod:Fluck.kt$@Composable fun BrowserErrorView( error: Throwable, url: String, retryCount: Int = 0, maxRetries: Int = 3, onRetry: (() -&gt; Unit)? = null, onReset: (() -&gt; Unit)? = null, onResetBrowser: (() -&gt; Unit)? = null, onRetryEngine: (() -&gt; Unit)? = null, )</ID>
     <ID>CyclomaticComplexMethod:Fluck.kt$FluckTabComponent$@Composable override fun Content()</ID>
@@ -163,7 +161,6 @@
     <ID>CyclomaticComplexMethod:MenuShortcutBridge.kt$MenuShortcutBridge$private fun keyNameToComposeKey(keyName: String): Key?</ID>
     <ID>CyclomaticComplexMethod:PasskeyAuthService.kt$PasskeyAuthService$suspend fun authenticateWithPasskey( email: String? = null, credentialId: String? = null, ): Result&lt;Unit&gt;</ID>
     <ID>CyclomaticComplexMethod:PasskeyWaitingScreen.kt$@Composable fun PasskeyWaitingScreen( email: String, viewModel: LoginViewModel, onBack: () -&gt; Unit, onSuccess: () -&gt; Unit, )</ID>
-    <ID>CyclomaticComplexMethod:PerformanceDataProviderImpl.kt$PerformanceDataProviderImpl$private fun queryProcessMetrics(pids: List&lt;Long&gt;): Map&lt;Long, OsProcessMetrics&gt;</ID>
     <ID>CyclomaticComplexMethod:PerformanceMonitor.kt$PerformanceMonitor$fun start()</ID>
     <ID>CyclomaticComplexMethod:PluginInstallService.kt$PluginInstallService$private fun downloadFromGitHubRelease( owner: String, repo: String, pluginDir: File, ): String?</ID>
     <ID>CyclomaticComplexMethod:PluginInstallService.kt$PluginInstallService$suspend fun installPlugins( plugins: List&lt;WizardPluginInfo&gt;, onProgress: (Float, String) -&gt; Unit, ): Result&lt;PluginInstallResult&gt;</ID>
@@ -268,7 +265,6 @@
     <ID>LongMethod:BrowserFunctions.kt$private fun configureBrowserPopupHandler( browser: Browser, onOpenInNewTab: (String) -&gt; Unit, )</ID>
     <ID>LongMethod:BrowserHandleImpl.kt$BrowserHandleImpl$@OptIn(ExperimentalComposeUiApi::class) @Composable override fun Content()</ID>
     <ID>LongMethod:BrowserHandleImpl.kt$BrowserHandleImpl$override fun dispatchCoBrowseInput(inputJson: String)</ID>
-    <ID>LongMethod:BrowserHandleImpl.kt$BrowserHandleImpl$private fun getFormFieldInfoFromJS(frame: com.teamdev.jxbrowser.frame.Frame): FormFieldInfo?</ID>
     <ID>LongMethod:BrowserHandleImpl.kt$BrowserHandleImpl$private fun setupContextMenuHandler()</ID>
     <ID>LongMethod:BrowserHandleImpl.kt$BrowserHandleImpl$private fun setupEventListeners()</ID>
     <ID>LongMethod:BrowserHandleImpl.kt$BrowserHandleImpl$private fun setupPopupHandler()</ID>
@@ -479,10 +475,8 @@
     <ID>LoopWithTooManyJumpStatements:BrowserServiceImpl.kt$BrowserServiceImpl$for</ID>
     <ID>LoopWithTooManyJumpStatements:CLIInstaller.kt$CLIInstaller$for</ID>
     <ID>LoopWithTooManyJumpStatements:DesktopGitService.kt$GitService$while</ID>
-    <ID>LoopWithTooManyJumpStatements:FileIndexer.kt$FileIndexer$for</ID>
     <ID>LoopWithTooManyJumpStatements:GitHubUpdateSource.kt$GitHubUpdateSource$while</ID>
     <ID>LoopWithTooManyJumpStatements:GlobalSearchDialog.kt$for</ID>
-    <ID>LoopWithTooManyJumpStatements:PerformanceDataProviderImpl.kt$PerformanceDataProviderImpl$for</ID>
     <ID>LoopWithTooManyJumpStatements:PluginInstallService.kt$PluginInstallService$for</ID>
     <ID>LoopWithTooManyJumpStatements:PluginStoreSetup.kt$PluginStoreSetup$for</ID>
     <ID>LoopWithTooManyJumpStatements:ReleaseNotesMarkdown.kt$while</ID>
@@ -646,9 +640,6 @@
     <ID>MaxLineLength:DesktopGitService.kt$GitService$val errorMessage = "Unexpected error during clone: ${e.message ?: e.javaClass.simpleName}. Please check logs for details."</ID>
     <ID>MaxLineLength:DesktopGitTerminalService.kt$GitTerminalService$logger.warn(LogCategory.TERMINAL, "Failed to open in sidebar terminal - panel may not be open", mapOf("windowId" to windowId))</ID>
     <ID>MaxLineLength:DesktopLLMSettingsManager.kt$LLMSettingsManager$logger.info(LogCategory.SYSTEM, "Created environment variables template", mapOf("path" to envFile.absolutePath))</ID>
-    <ID>MaxLineLength:DesktopMainFunctionDetector.kt$DesktopMainFunctionDetector$private fun generateJavaScriptCommand(detected: DetectedMainFunction): String</ID>
-    <ID>MaxLineLength:DesktopMainFunctionDetector.kt$DesktopMainFunctionDetector$private fun generatePythonCommand(detected: DetectedMainFunction): String</ID>
-    <ID>MaxLineLength:DesktopMainFunctionDetector.kt$DesktopMainFunctionDetector$private fun generateTypeScriptCommand(detected: DetectedMainFunction): String</ID>
     <ID>MaxLineLength:DesktopRunConfigurationManager.kt$RunConfigurationManager$logger.debug(LogCategory.SYSTEM, "Configuration already exists, skipping", mapOf("filePath" to config.filePath))</ID>
     <ID>MaxLineLength:DesktopRunConfigurationManager.kt$RunConfigurationManager$logger.debug(LogCategory.SYSTEM, "Found runnable configurations", mapOf("count" to detectedWithUniqueNames.size))</ID>
     <ID>MaxLineLength:DesktopRunConfigurationManager.kt$RunConfigurationManager$logger.debug(LogCategory.SYSTEM, "Scanning project for run configurations", mapOf("path" to projectPath))</ID>
@@ -974,14 +965,13 @@
     <ID>NestedBlockDepth:DynamicPluginManager.kt$DynamicPluginManager$suspend fun installPlugin( jarPath: String, enabled: Boolean = true, ): Result&lt;DynamicPluginInfo&gt;</ID>
     <ID>NestedBlockDepth:DynamicPluginManager.kt$DynamicPluginManager$suspend fun loadPersistedPlugins(plugins: List&lt;PersistedPluginEntry&gt;): Map&lt;String, Result&lt;DynamicPluginInfo&gt;&gt;</ID>
     <ID>NestedBlockDepth:DynamicPluginManager.kt$DynamicPluginManager.Companion$private suspend fun hotSwapApiLayerOrchestration(pluginDir: java.io.File): Result&lt;Int&gt;</ID>
-    <ID>NestedBlockDepth:FileIndexer.kt$FileIndexer$private fun scanDirectory( dir: File, rootCanonicalPath: String, rootPathLength: Int, files: MutableList&lt;IndexedFile&gt;, depth: Int = 0, )</ID>
     <ID>NestedBlockDepth:FluckEngine.kt$FluckEngine$private fun cleanupStaleLockFiles(profileDir: java.nio.file.Path): Boolean</ID>
     <ID>NestedBlockDepth:FluckEngine.kt$FluckEngine$private fun killStaleChromiumProcesses()</ID>
     <ID>NestedBlockDepth:FontManager.kt$FontManager$private fun discoverAndCategorizeFonts(): Map&lt;String, List&lt;String&gt;&gt;</ID>
     <ID>NestedBlockDepth:GitHubUpdateSource.kt$GitHubUpdateSource$override suspend fun listReleases(): List&lt;GitHubRelease&gt;</ID>
     <ID>NestedBlockDepth:GlobalSearchService.kt$GlobalSearchService$private suspend fun searchPluginProviders(query: String): List&lt;SearchResult&gt;</ID>
     <ID>NestedBlockDepth:KeyboardEventBus.kt$KeyboardEventBus$suspend fun emit(event: KeyboardEvent): Boolean</ID>
-    <ID>NestedBlockDepth:KeymapSettingsManager.kt$KeymapSettingsManager$private fun loadSettingsSync()</ID>
+    <ID>NestedBlockDepth:KeymapSettingsManager.kt$KeymapSettingsManager$internal fun loadSettingsSync()</ID>
     <ID>NestedBlockDepth:PasskeyAuthService.kt$PasskeyAuthService$suspend fun authenticateWithPasskey( email: String? = null, credentialId: String? = null, ): Result&lt;Unit&gt;</ID>
     <ID>NestedBlockDepth:PasskeySessionHandler.kt$PasskeySessionHandler$suspend fun completeAuthentication(authData: PasskeyAuthenticationResult): Result&lt;Unit&gt;</ID>
     <ID>NestedBlockDepth:PluginStoreSetup.kt$PluginStoreSetup$private fun copyBundledPluginsToPluginDir(dynamicPluginManager: ai.rever.boss.components.plugin.DynamicPluginManager)</ID>
@@ -1086,7 +1076,7 @@
     <ID>ReturnCount:BrowserFunctions.kt$actual fun isBrowserValid(browser: Any?): Boolean</ID>
     <ID>ReturnCount:BrowserFunctions.kt$actual fun recreateBrowserViewState( browser: Any, window: Any?, ): Any?</ID>
     <ID>ReturnCount:BrowserServiceImpl.kt$BrowserServiceImpl$override fun deleteProfile(profileName: String): Boolean</ID>
-    <ID>ReturnCount:CLICommandHandler.kt$CLICommandHandler$private suspend fun handleLoadWorkspace(configPath: String)</ID>
+    <ID>ReturnCount:CLICommandHandler.kt$CLICommandHandler$private suspend fun handleLoadWorkspace(command: CLICommand.LoadWorkspace)</ID>
     <ID>ReturnCount:CLICommandHandler.kt$CLICommandHandler$private suspend fun handleOpenFile(filePath: String)</ID>
     <ID>ReturnCount:CLICommandHandler.kt$CLICommandHandler$private suspend fun handleOpenFolder(folderPath: String)</ID>
     <ID>ReturnCount:CLIInstaller.kt$CLIInstaller$private fun installHomebrewStyle(): CLIInstallResult</ID>
@@ -1094,7 +1084,7 @@
     <ID>ReturnCount:CLISecurityValidator.kt$CLISecurityValidator$fun isValidOpenTargetPath(path: String): Boolean</ID>
     <ID>ReturnCount:CLISecurityValidator.kt$CLISecurityValidator$fun isValidPath(path: String): Boolean</ID>
     <ID>ReturnCount:CLISecurityValidator.kt$CLISecurityValidator$fun normalizeAndValidateUrl(url: String): String?</ID>
-    <ID>ReturnCount:ChromiumAutoDownloader.kt$ChromiumAutoDownloader$fun isChromiumInstalled(): Boolean</ID>
+    <ID>ReturnCount:ChromiumAutoDownloader.kt$ChromiumAutoDownloader$internal fun chromiumInstalledAt( dir: Path = getChromiumDir(), requiredVersion: String = effectiveVersion, isMac: Boolean = System.getProperty("os.name").lowercase().contains("mac"), repairAttempted: () -&gt; Boolean = ::repairAlreadyAttempted, recordRepair: () -&gt; Unit, ): Boolean</ID>
     <ID>ReturnCount:ChromiumAutoDownloader.kt$ChromiumAutoDownloader$internal fun promotePendingInstall( pending: File, target: File, backup: File, )</ID>
     <ID>ReturnCount:ChromiumReleaseSource.kt$ChromiumReleaseResolver.Companion$private fun comparePreRelease( a: List&lt;String&gt;, b: List&lt;String&gt;, ): Int</ID>
     <ID>ReturnCount:CrossDeviceAuthService.kt$CrossDeviceAuthService$suspend fun handleCrossDeviceAuthentication( exception: CrossDeviceAuthenticationRequired, onAuthenticationComplete: suspend (PasskeyAuthenticationResult) -&gt; Result&lt;Unit&gt;, ): Result&lt;Unit&gt;</ID>
@@ -1109,9 +1099,6 @@
     <ID>ReturnCount:DesktopBrowserAccessor.kt$private fun findBrowserForTab( splitViewState: ai.rever.boss.components.window_panel.SplitViewState, tabId: String, ): LockedBrowser?</ID>
     <ID>ReturnCount:DesktopLLMSettingsManager.kt$actual fun getEnvironmentVariable(name: String): String?</ID>
     <ID>ReturnCount:DesktopMainFunctionDetector.kt$DesktopMainFunctionDetector$private fun findProjectRootInternal(startDir: File?): File?</ID>
-    <ID>ReturnCount:DesktopMainFunctionDetector.kt$DesktopMainFunctionDetector$private fun generateJavaCommand( detected: DetectedMainFunction, projectDir: File, ): String</ID>
-    <ID>ReturnCount:DesktopMainFunctionDetector.kt$DesktopMainFunctionDetector$private fun generateKotlinCommand( detected: DetectedMainFunction, projectDir: File, ): String</ID>
-    <ID>ReturnCount:DesktopMainFunctionDetector.kt$DesktopMainFunctionDetector$private fun generateRustCommand( detected: DetectedMainFunction, projectDir: File, ): String</ID>
     <ID>ReturnCount:DesktopProjectCreationService.kt$ProjectCreationService$actual fun validateProjectLocation( parentDirectory: String, projectName: String, ): ValidationResult</ID>
     <ID>ReturnCount:DesktopRunnerTerminalService.kt$RunnerTerminalService$actual suspend fun stopRunner( windowId: String, configId: String, ): Boolean</ID>
     <ID>ReturnCount:DesktopUpdateService.kt$UpdateService$actual suspend fun checkForUpdates(): UpdateInfo</ID>

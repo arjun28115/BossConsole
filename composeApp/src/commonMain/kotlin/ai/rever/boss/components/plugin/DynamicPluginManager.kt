@@ -255,6 +255,10 @@ class DynamicPluginManager(
     @Volatile
     internal var persistedReloadJarPath: ((String) -> String?)? = null
 
+    /** Restarts a dependent through this window's plugin delegate. */
+    @Volatile
+    internal var restartDependentPlugin: (suspend (String) -> Unit)? = null
+
     companion object {
         private val companionLogger = BossLogger.forComponent("DynamicPluginManager")
 
@@ -363,7 +367,7 @@ class DynamicPluginManager(
          */
         private val swapScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-        private fun activeManagers(): List<DynamicPluginManager> {
+        internal fun activeManagers(): List<DynamicPluginManager> {
             liveManagers.removeIf { it.get() == null }
             return liveManagers.mapNotNull { it.get() }
         }
@@ -803,7 +807,7 @@ class DynamicPluginManager(
      *   plugin's [PluginManifest.requiredPermissions]. An empty list (legacy
      *   plugins) means "available to any authenticated user".
      */
-    private fun canAccess(manifest: PluginManifest): Boolean =
+    internal fun canAccess(manifest: PluginManifest): Boolean =
         pluginAccessAllowed(
             isAdmin = _isAdmin.value,
             userPermissions = _userPermissions.value,
@@ -893,6 +897,41 @@ class DynamicPluginManager(
                     ai.rever.boss.plugin.api.Version
                         .parse(incoming.version)
                 if (installed != null && candidate != null && candidate > installed) {
+                    // Pre-check the trust gate BEFORE paying for the swap: it
+                    // unloads every plugin in every manager and re-runs
+                    // fromPluginDir, which now refuses unverifiable jars. A
+                    // swap triggered by this jar's manifest version that the
+                    // gate cannot verify would tear everything down and land
+                    // on an older jar or an empty layer - strictly worse
+                    // than the layer we just unloaded (BossConsole#851).
+                    val swapDir = java.io.File(jarPath).parentFile ?: java.io.File(".")
+                    // selectApiJar owns the enforce/rollback lever, so this
+                    // pre-check agrees with what the swap's fromPluginDir will
+                    // actually install; with the lever off, the pre-gate swap
+                    // behaviour is restored end-to-end (round-3 review).
+                    val verified =
+                        ai.rever.boss.plugin.loader.ApiClassLoader
+                            .selectApiJar(swapDir)
+                    val gateEnforced =
+                        ai.rever.boss.plugin.loader.ApiClassLoader
+                            .isGateEnforced()
+                    if (verified == null || (gateEnforced && verified.version < candidate)) {
+                        logger.warn(
+                            LogCategory.SYSTEM,
+                            "Newer api jar has no trust proof that verifies over its " +
+                                "claimed identity - refusing the hot swap rather than " +
+                                "degrading the live API layer",
+                            mapOf(
+                                "incomingVersion" to candidate.toString(),
+                                "newestVerifiedVersion" to (verified?.version?.toString() ?: "none"),
+                            ),
+                        )
+                        return Result.failure(
+                            IllegalStateException(
+                                "api jar $candidate cannot be verified; the API layer was not swapped",
+                            ),
+                        )
+                    }
                     logger.info(
                         LogCategory.SYSTEM,
                         "Newer api plugin installed - hot-swapping the API layer",
@@ -901,15 +940,17 @@ class DynamicPluginManager(
                             "to" to candidate.toString(),
                         ),
                     )
-                    hotSwapApiLayer(java.io.File(jarPath).parentFile ?: java.io.File(".")).onFailure {
+                    hotSwapApiLayer(swapDir).onFailure {
                         return Result.failure(it)
                     }
                     // If the swap's snapshot contained the api plugin, it was
-                    // already reloaded — return that entry. The update bridge
-                    // however UNINSTALLS the api plugin before handing us the
-                    // new jar, so the snapshot may have lacked it: fall through
-                    // to a normal install (versions are now equal, so the
-                    // trigger won't re-fire) to (re)create the plugin entry.
+                    // already reloaded - return that entry. Store updates can no
+                    // longer reach this route (the update bridge never offers a
+                    // protected id, and UpdateJarIdentityVet refuses such a jar),
+                    // but a deferred-restart snapshot may still lack the api
+                    // plugin: fall through to a normal install (versions are now
+                    // equal, so the trigger won't re-fire) to (re)create the
+                    // plugin entry.
                     getPluginInfo(ai.rever.boss.plugin.loader.ApiClassLoader.API_PLUGIN_ID)
                         ?.let { return Result.success(it) }
                 }
@@ -1284,6 +1325,19 @@ class DynamicPluginManager(
                 isDisabled = { id -> _pluginStates.value[id]?.state == PluginState.DISABLED },
             ).sortedBy { dependent -> dependent.loadPriority }
 
+    /** Checks unload-aware components without treating approved dependents as a veto. */
+    internal suspend fun checkUnloadAware(pluginId: String): CanUnloadResult {
+        val reasons = mutableListOf<String>()
+        for (ref in unloadAwareComponents) {
+            val component = ref.get() ?: continue
+            val result = component.checkCanUnload(pluginId)
+            if (result is CanUnloadResult.NotAllowed) {
+                reasons.addAll(result.reasons)
+            }
+        }
+        return if (reasons.isEmpty()) CanUnloadResult.Ok else CanUnloadResult.NotAllowed(reasons)
+    }
+
     /**
      * Check if a plugin can be unloaded without issues.
      *
@@ -1293,13 +1347,9 @@ class DynamicPluginManager(
     suspend fun checkCanUnload(pluginId: String): CanUnloadResult {
         val reasons = mutableListOf<String>()
 
-        // Check with all unload-aware components
-        for (ref in unloadAwareComponents) {
-            val component = ref.get() ?: continue
-            val result = component.checkCanUnload(pluginId)
-            if (result is CanUnloadResult.NotAllowed) {
-                reasons.addAll(result.reasons)
-            }
+        val unloadAwareResult = checkUnloadAware(pluginId)
+        if (unloadAwareResult is CanUnloadResult.NotAllowed) {
+            reasons.addAll(unloadAwareResult.reasons)
         }
 
         // Check for dependent plugins. Only plugins that actually require this one veto the
@@ -2399,6 +2449,7 @@ class DynamicPluginManager(
         // hot swap would try to reload into it, and a process-wide holder that resolves a manager
         // lazily (HomeCatalogAccess's installer) would hand it an install that lands nowhere.
         liveManagers.removeIf { it.get() === this || it.get() == null }
+        restartDependentPlugin = null
 
         // Cancel scope
         managerScope.cancel()

@@ -902,10 +902,11 @@ class SplitViewState(
             ?: DefaultWorkingDirectory.resolve(projectPath)
     }
 
-    private fun openTerminalInActivePanelNow(
+    @Suppress("ReturnCount")
+    internal fun openTerminalInActivePanelNow(
         command: String?,
         workingDirectory: String?,
-    ) {
+    ): TerminalTabInfo? {
         val activeComponent = getActiveTabsComponent()
         val terminalWorkingDir = terminalWorkingDirectory(workingDirectory)
 
@@ -916,7 +917,7 @@ class SplitViewState(
             val firstPanel = getAllPanels().firstOrNull()
             if (firstPanel == null) {
                 splitViewLogger.error(LogCategory.UI, "No panels available to create terminal tab")
-                return
+                return null
             }
 
             val component = firstPanel.tabsComponent
@@ -946,10 +947,11 @@ class SplitViewState(
                         emptyMap()
                     },
                 )
+                return terminalTab
             } else {
                 splitViewLogger.error(LogCategory.UI, "Failed to add terminal tab to panel")
+                return null
             }
-            return
         }
 
         // Create new terminal tab in active panel
@@ -966,8 +968,10 @@ class SplitViewState(
         if (tabIndex >= 0) {
             activeComponent.selectTab(tabIndex)
             splitViewLogger.debug(LogCategory.UI, "Terminal tab created", if (command != null) mapOf("command" to command) else emptyMap())
+            return terminalTab
         } else {
             splitViewLogger.error(LogCategory.UI, "Failed to create terminal tab")
+            return null
         }
     }
 
@@ -1741,6 +1745,17 @@ class SplitViewState(
     }
 
     fun clearAllPanels() {
+        // The outgoing tree becomes unreachable the moment _rootNode is reassigned, so
+        // its tabs are disposed HERE: destroy() is what releases a browser or terminal
+        // tab's native process, and closeCurrentWorkspace clears tabs through the same
+        // clearAllTabs path for that reason. A tree still held by preserveCurrentState is
+        // exempt - it must survive to be restored on switch-back, and its live tabs keep
+        // moving through moveTabToWorkspace and collectAllActiveTabs while preserved.
+        val outgoingRoot = _rootNode.value
+        val stillPreserved = preservedWorkspaceStates.values.any { it.rootNode === outgoingRoot }
+        if (!stillPreserved) {
+            getAllPanels().forEach { panel -> panel.tabsComponent.clearAllTabs() }
+        }
         // Reset to single main panel
         val mainComponent = BossTabsComponent(createBossAppContext, tabRegistry, windowId)
         _rootNode.value =

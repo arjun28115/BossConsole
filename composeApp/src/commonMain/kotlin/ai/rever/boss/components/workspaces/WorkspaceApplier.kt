@@ -56,8 +56,10 @@ suspend fun applyWorkspace(
     restoreProject: Boolean = true,
     warmEngine: () -> Unit = ::warmBrowserEngineForTabs,
 ) {
-    // Generate ID if missing
-    val workspaceId = workspace.id.ifEmpty { LayoutWorkspace.generateId() }
+    // Generate ID if missing. Blank, not just empty, and the collision-safe mint:
+    // a timestamp-only id is throwaway the moment two Spaces share a millisecond,
+    // and the preserved tree below is keyed under whatever lands here.
+    val workspaceId = workspace.id.ifBlank { mintWorkspaceId() }
 
     // Restore project if workspace has one and restoreProject is true
     if (restoreProject && windowProjectState != null) {
@@ -140,8 +142,12 @@ suspend fun applyWorkspace(
  * registration timeout elapses. On timeout the apply proceeds anyway — tabs of
  * still-missing types are skipped exactly as before, but a warning is logged
  * instead of failing silently.
+ *
+ * internal because the MCP workspace provider needs the same gate for its direct
+ * terminal open: `openTerminalInActivePanelNow` drops a tab whose type has no
+ * factory yet, which is exactly the cold start that tool exists for.
  */
-private suspend fun TabRegistry.awaitTabTypes(typeIds: Set<TabTypeId>) {
+internal suspend fun TabRegistry.awaitTabTypes(typeIds: Set<TabTypeId>) {
     fun missing() = typeIds.filterNot { isRegistered(it) }
     if (missing().isEmpty()) return
 

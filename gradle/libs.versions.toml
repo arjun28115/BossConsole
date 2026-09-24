@@ -48,12 +48,14 @@ ktor = "3.5.2"
 logback = "1.6.3"
 precompose = "1.6.2"
 slf4j = "2.0.18"
+re2j = "1.8"
 supabase = "3.8.0"
 zxing = "3.5.4"
 jxbrowser = "9.5.0"
 jxbrowser-gradle-plugin = "2.1.0"
 maven-publish = "0.37.0"
 jna = "5.19.1"
+bouncycastle = "1.86"
 # Reads the SQLite databases browsers keep their bookmarks and logins in
 # (Chromium "Login Data", Firefox places.sqlite / key4.db). Desktop-only.
 sqlite-jdbc = "3.53.4.0"
@@ -62,7 +64,7 @@ grpc = "1.84.0"
 grpc-kotlin = "1.5.0"
 protobuf = "4.36.1"
 protobuf-gradle-plugin = "0.10.0"
-graalvm-native-plugin = "1.1.12"
+graalvm-native-plugin = "1.1.13"
 # IntelliJ PSI for code navigation
 intellij-platform = "243.21565.199"
 # The plugin API contract (risa-labs-inc/boss-plugin-api releases). This pin
@@ -172,9 +174,10 @@ intellij-platform = "243.21565.199"
 # bump-pushes before building, so api main's version IS the version already released and the next
 # merge cuts version + 1 - re-read it when #44 actually merges, because anything landing first
 # moves this and the topofmind pin again.
-boss-plugin-api = "1.0.90"
+boss-plugin-api = "1.0.93"
 
 [libraries]
+bouncycastle-pkix = { module = "org.bouncycastle:bcpkix-jdk18on", version.ref = "bouncycastle" }
 kotlin-test-junit = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit-jupiter" }
 # Runs the JUnit 4 rules Compose UI testing is built on (createComposeRule) on the

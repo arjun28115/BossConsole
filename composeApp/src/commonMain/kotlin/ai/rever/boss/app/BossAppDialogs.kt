@@ -7,6 +7,7 @@ import ai.rever.boss.components.dialogs.GlobalSearchDialog
 import ai.rever.boss.components.dialogs.HtmlFileOpenDialog
 import ai.rever.boss.components.dialogs.LogoutConfirmationDialog
 import ai.rever.boss.components.dialogs.McpApprovalDialog
+import ai.rever.boss.components.dialogs.McpYoloConfirmation
 import ai.rever.boss.components.dialogs.NewProjectWizardDialog
 import ai.rever.boss.components.dialogs.NewTabDialog
 import ai.rever.boss.components.dialogs.ProjectOpenModeDialog
@@ -31,9 +32,11 @@ import ai.rever.boss.components.plugin.PluginHealthCenterDialog
 import ai.rever.boss.components.plugin.PluginLoadGateHost
 import ai.rever.boss.components.plugin.PluginLoadRemedyAccess
 import ai.rever.boss.components.plugin.PluginStoreVersionBridge
+import ai.rever.boss.components.plugin.PluginUpdateAlreadyInProgressException
 import ai.rever.boss.components.plugin.PluginUpdateBridge
 import ai.rever.boss.components.plugin.openTopOfMindQuickSwitcher
 import ai.rever.boss.components.plugin.providers.GenericDialogHostContent
+import ai.rever.boss.components.plugin.registries.DeepLinkActionRegistryImpl
 import ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo
 import ai.rever.boss.components.registery.PanelComponentStoreRegistry
 import ai.rever.boss.components.registery.TabTypeId
@@ -41,8 +44,11 @@ import ai.rever.boss.components.windows.SettingsWindow
 import ai.rever.boss.components.wizard.plugin.PluginWizardIntegration
 import ai.rever.boss.components.wizard.plugin.PluginWizardWindow
 import ai.rever.boss.components.wizard.plugin.rememberPluginInstallWizardState
+import ai.rever.boss.components.workspaces.ProjectSelectionWorkspace
 import ai.rever.boss.components.workspaces.SelectWorkspaceDialog
+import ai.rever.boss.components.workspaces.WorkspaceSettingsManager
 import ai.rever.boss.components.workspaces.applyWorkspace
+import ai.rever.boss.components.workspaces.resolveOnProjectSelection
 import ai.rever.boss.components.workspaces.spaceToOpen
 import ai.rever.boss.components.workspaces.workspaceManager
 import ai.rever.boss.dashboard.DashboardStatsManager
@@ -68,10 +74,13 @@ import ai.rever.boss.plugin.ui.BossTheme
 import ai.rever.boss.project.DefaultWorkingDirectory
 import ai.rever.boss.run.RunConfigurationManager
 import ai.rever.boss.run.RunExecutionService
+import ai.rever.boss.search.SPOTLIGHT_UNSUPPORTED_COMMAND_IDS
 import ai.rever.boss.search.SearchSources
 import ai.rever.boss.search.ToolSearchRecord
+import ai.rever.boss.search.rememberSpotlightFileIndexer
 import ai.rever.boss.services.auth.UserDataStorage
 import ai.rever.boss.services.bookmarks.BookmarkAPIAccess
+import ai.rever.boss.services.terminal.TerminalAPIAccess
 import ai.rever.boss.settings.MICROKERNEL_MODE_CONFIRMATION_MESSAGE
 import ai.rever.boss.settings.MicrokernelModePreference
 import ai.rever.boss.terminal.TerminalLinkSettingsManager
@@ -81,6 +90,7 @@ import ai.rever.boss.utils.logging.LogCategory
 import ai.rever.boss.window.MenuActionsHandler
 import ai.rever.boss.window.Project
 import ai.rever.boss.window.WindowOperations
+import ai.rever.boss.window.WindowProjectState
 import ai.rever.boss.window.selectProjectInWindow
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
@@ -89,6 +99,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -109,6 +120,7 @@ internal fun BossAppDialogs(state: BossAppState) {
     val splitViewState = state.splitViewState
     val windowProjectState = state.windowProjectState
     val selectedProject by windowProjectState.selectedProject.collectAsState()
+    val spotlightFileIndexer = rememberSpotlightFileIndexer(state.spotlightFileIndexes, selectedProject.path)
 
     // Keymap settings (used by ShortcutHelpDialog)
     val keymapSettings by KeymapSettingsManager.currentSettings.collectAsState()
@@ -131,6 +143,12 @@ internal fun BossAppDialogs(state: BossAppState) {
                             r.isSuccess -> {
                                 StatusMessageManager.showMessage(
                                     "Updated ${prompt.displayName} to v${r.getOrNull()}",
+                                )
+                            }
+
+                            cause is PluginUpdateAlreadyInProgressException -> {
+                                StatusMessageManager.showMessage(
+                                    "${prompt.displayName} update is still in progress",
                                 )
                             }
 
@@ -332,7 +350,7 @@ internal fun BossAppDialogs(state: BossAppState) {
                             FluckTabInfo(
                                 id = "browser-${Random.nextLong()}",
                                 typeId = TabTypeId("fluck"),
-                                _title = "Loading...",
+                                _title = if (FluckTabInfo.isHomeUrl(path)) FluckTabInfo.HOME_TITLE else "Loading...",
                                 url = path,
                             )
                         place(tab)
@@ -389,22 +407,29 @@ internal fun BossAppDialogs(state: BossAppState) {
         )
     }
 
-    // "Which workspace do you want?" - raised by the project-selection effect when the
-    // default workspace setting is `ask`, the default on a fresh install.
-    state.pendingWorkspacePrompt?.let { projectName ->
+    // "Which Space?" - raised by "New Space" in the project-open dialog, and by the
+    // project-selection effect when a plugin selects a project and the setting is `ask`.
+    state.pendingWorkspacePrompt?.let { prompt ->
         val workspaces by workspaceManager.workspaces.collectAsState()
         SelectWorkspaceDialog(
-            projectName = projectName,
+            projectName = prompt.project.name,
+            projectIsOpen = !prompt.placeOnPick,
             // The same list the top bar's workspace button and the app menu show, saved
             // workspaces included. Reading PredefinedWorkspaces here instead would offer a
             // different set than the rest of the app does.
-            workspaces = workspaces,
+            //
+            // Only the Spaces this project can open in: applying a saved Space also selects the
+            // project it was saved with, so one of another project's would swap this one out.
+            workspaces = spacesForProject(workspaces, prompt.project.path),
             onDismiss = {
                 state.pendingWorkspacePrompt = null
                 state.focusRequester.requestFocus()
             },
             onSelect = { workspace ->
                 state.pendingWorkspacePrompt = null
+                // New Space places the project only now, so dismissing the list opened nothing.
+                if (prompt.placeOnPick) placeProjectHere(state, windowProjectState, prompt.project)
+                if (prompt.showCodebase) state.draggablePanelComponent.setPanelVisible(left.top, true)
                 coroutineScope.launch {
                     // Preserve, load, apply: the same three steps the top bar's workspace
                     // switch takes, so a workspace opened from here can be switched away
@@ -415,7 +440,7 @@ internal fun BossAppDialogs(state: BossAppState) {
                     }
                     // A template picked here is materialised into a Space first - see
                     // `spaceToOpen`, which every pick in the app goes through.
-                    val opened = spaceToOpen(workspace, windowProjectState.selectedProject.value.path)
+                    val opened = spaceToOpen(workspace, prompt.project.path)
                     workspaceManager.loadWorkspace(opened)
                     applyWorkspace(opened, splitViewState, windowProjectState)
                 }
@@ -440,7 +465,7 @@ internal fun BossAppDialogs(state: BossAppState) {
         )
     }
 
-    if (state.showGlobalSearchDialog) {
+    if (state.showGlobalSearchDialog && spotlightFileIndexer != null) {
         // Offer THIS window's tools to the search, for exactly as long as its dialog is open.
         //
         // Registered here rather than per window, because the window that matters is the one whose
@@ -473,6 +498,8 @@ internal fun BossAppDialogs(state: BossAppState) {
 
         GlobalSearchDialog(
             projectPath = selectedProject.path,
+            fileIndexer = spotlightFileIndexer,
+            onIndexProject = { state.spotlightFileIndexes.ensureIndexed(selectedProject.path) },
             workspaceManager = workspaceManager,
             windowId = windowId,
             onDismiss = {
@@ -582,6 +609,10 @@ internal fun BossAppDialogs(state: BossAppState) {
                         MenuActionsHandler.triggerCloseTab(windowId)
                     }
 
+                    KeymapActions.BROWSER_PRINT -> {
+                        MenuActionsHandler.triggerPrintBrowser(windowId)
+                    }
+
                     KeymapActions.BROWSER_RELOAD -> {
                         MenuActionsHandler.triggerReloadBrowser(windowId)
                     }
@@ -654,7 +685,46 @@ internal fun BossAppDialogs(state: BossAppState) {
                         MenuActionsHandler.triggerShowShortcutHelp(windowId)
                     }
 
-                    else -> {} // Unknown command
+                    else -> {
+                        // Every tab-navigation and browser-history command Spotlight advertises
+                        // (BossConsole#700) - previously silently discarded here.
+                        when (val outcome = dispatchSpotlightTabBrowserCommand(actionId, windowId)) {
+                            is SpotlightDispatchOutcome.Dispatched -> {}
+
+                            // Recognized, but the state it needs (another tab, a closed-tab
+                            // history entry, a tab at that position) is not there right now.
+                            is SpotlightDispatchOutcome.Unavailable -> {
+                                StatusMessageManager.showMessage(
+                                    "\"${KeymapActions.getDescription(actionId)}\": ${outcome.reason}",
+                                    durationMs = 4_000L,
+                                )
+                            }
+
+                            SpotlightDispatchOutcome.NotRecognized -> {
+                                // A catalog id neither handled above, dispatched, nor named
+                                // unsupported - SpotlightCommandCoverageTest exists to catch this
+                                // before it ships. Reaching it here anyway (GlobalSearchService
+                                // already excludes SPOTLIGHT_UNSUPPORTED_COMMAND_IDS from
+                                // Spotlight's results, so this would mean a stale result list
+                                // from before a dismiss/reopen) is a wiring bug for an
+                                // unclassified id, not a user-facing limitation - log it there,
+                                // but show the same message either way rather than discarding
+                                // the selection with no signal.
+                                if (actionId !in SPOTLIGHT_UNSUPPORTED_COMMAND_IDS) {
+                                    logger.warn(
+                                        LogCategory.UI,
+                                        "Spotlight command has no dispatch route",
+                                        mapOf("actionId" to actionId),
+                                    )
+                                }
+                                val description = KeymapActions.getDescription(actionId)
+                                StatusMessageManager.showMessage(
+                                    "\"$description\" isn't available from Spotlight yet",
+                                    durationMs = 4_000L,
+                                )
+                            }
+                        }
+                    }
                 }
                 state.focusRequester.requestFocus()
             },
@@ -794,6 +864,25 @@ internal fun BossAppDialogs(state: BossAppState) {
         )
     }
 
+    // The same question for a Space whose terminal tabs carry commands.
+    SpaceLoadPrompt(state)
+
+    // A plugin action that reached BOSS from outside the operator's own `boss`
+    // invocation. Nothing has been dispatched yet: this prompt is the only path
+    // from such a link to the plugin's registered handler.
+    PluginActionApprovalPrompt(state.pluginActionApprovals) { pending ->
+        logger.info(
+            LogCategory.SYSTEM,
+            "Operator confirmed an externally requested plugin action",
+            mapOf("windowId" to windowId, "handlerId" to pending.handlerId, "action" to pending.action),
+        )
+        val handled = DeepLinkActionRegistryImpl.dispatch(pending.handlerId, pending.action, pending.params)
+        if (!handled) StatusMessageManager.showMessage("Plugin action was not handled")
+    }
+
+    // YOLO mode's confirmation, raised from the bottom bar or the Tools menu (McpYoloPrompt).
+    McpYoloConfirmation(windowId)
+
     // Interactive approval dialog for governed MCP tools invoked by an AI agent
     state.pendingMcpApproval?.let { approvalRequest ->
         val pendingList by McpToolRegistryImpl.approvalBus.pendingList.collectAsState()
@@ -810,6 +899,9 @@ internal fun BossAppDialogs(state: BossAppState) {
             },
             onDeny = { reason, persistPolicy ->
                 McpToolRegistryImpl.approvalBus.deny(approvalRequest.id, reason, persistPolicy)
+            },
+            onDenyAllPending = {
+                McpToolRegistryImpl.approvalBus.denyAllPending()
             },
         )
     }
@@ -1028,18 +1120,10 @@ internal fun BossAppDialogs(state: BossAppState) {
         rememberDirectoryPicker { path ->
             path?.let {
                 val projectName = it.extractFileName().ifEmpty { "Unknown" }
-                selectProjectInWindow(
-                    windowProjectState,
-                    Project(
-                        name = projectName,
-                        path = it,
-                    ),
-                )
-                // Show CodeBase panel when project is selected
-                state.draggablePanelComponent.setPanelVisible(
-                    left.top,
-                    true,
-                )
+                // Asked where it goes, like every other way of opening a project. The CodeBase
+                // panel this picker has always shown opens once the project lands HERE.
+                val picked = Project(name = projectName, path = it)
+                requestProjectOpen(state, windowProjectState, picked, showCodebase = true)
                 // Close the dialog after selection
                 state.showProjectDialog = false
             }
@@ -1065,7 +1149,7 @@ internal fun BossAppDialogs(state: BossAppState) {
                 state.focusRequester.requestFocus()
             },
             onProjectCreated = { project ->
-                selectProjectInWindow(windowProjectState, project)
+                requestProjectOpen(state, windowProjectState, project)
                 state.showNewProjectDialog = false
                 state.focusRequester.requestFocus()
             },
@@ -1087,33 +1171,37 @@ internal fun BossAppDialogs(state: BossAppState) {
                         path = projectPath,
                     )
                 state.showCloneProjectDialog = false
-                // Check if a project is already open
-                if (selectedProject.path.isNotEmpty()) {
-                    // Show dialog to choose between current window or new window
-                    state.projectToOpen = project
-                } else {
-                    // No project open, directly open in current window
-                    selectProjectInWindow(windowProjectState, project)
-                    state.focusRequester.requestFocus()
-                }
+                requestProjectOpen(state, windowProjectState, project)
             },
         )
     }
 
-    // Project open mode dialog (for cloned projects and other project opening flows)
+    // "Where should this project open?" - the ONE place every host way of opening a project asks
+    // it. See ProjectOpenRequests, which carries the requests raised outside this composable.
     state.projectToOpen?.let { project ->
         ProjectOpenModeDialog(
             project = project,
             onDismiss = {
                 state.projectToOpen = null
+                state.projectToOpenShowsCodebase = false
                 state.focusRequester.requestFocus()
             },
-            onOpenInCurrentWindow = { selectedProj ->
-                selectProjectInWindow(windowProjectState, selectedProj)
+            onOpenInThisSpace = { selectedProj ->
+                placeProjectHere(state, windowProjectState, selectedProj)
+                if (state.projectToOpenShowsCodebase) state.draggablePanelComponent.setPanelVisible(left.top, true)
                 state.projectToOpen = null
+                state.projectToOpenShowsCodebase = false
+                state.focusRequester.requestFocus()
+            },
+            onOpenInNewSpace = { selectedProj ->
+                state.pendingWorkspacePrompt =
+                    SpacePrompt(selectedProj, placeOnPick = true, showCodebase = state.projectToOpenShowsCodebase)
+                state.projectToOpen = null
+                state.projectToOpenShowsCodebase = false
                 state.focusRequester.requestFocus()
             },
             onOpenInNewWindow = { selectedProj ->
+                state.projectToOpenShowsCodebase = false
                 // Create new window with the project - each window has independent project state
                 WindowOperations.createNewWindowWithProject(selectedProj)
                 state.projectToOpen = null
@@ -1147,6 +1235,22 @@ internal fun BossAppDialogs(state: BossAppState) {
                 state.focusRequester.requestFocus()
                 logger.info(LogCategory.SYSTEM, "Plugin wizard completed")
             },
+            onSetupBossTerm = {
+                if (TerminalAPIAccess.getProvider() == null) {
+                    StatusMessageManager.showMessage(
+                        "BOSS Term setup is unavailable. Update or reload Terminal Tab, then try again.",
+                    )
+                    logger.warn(LogCategory.SYSTEM, "BOSS Term setup requested without a Terminal Tab provider")
+                } else {
+                    coroutineScope.launch(Dispatchers.IO) {
+                        UserDataStorage.setPluginWizardCompleted(true)
+                    }
+                    state.showPluginInstallWizard = false
+                    state.terminalOnboardingOwnerStarted = true
+                    state.terminalOnboardingRequestGeneration++
+                    logger.info(LogCategory.SYSTEM, "Plugin wizard completed; opening BOSS Term setup")
+                }
+            },
             onInstallPlugins = { plugins, onProgress ->
                 when {
                     dynamicPluginManager != null -> {
@@ -1174,8 +1278,65 @@ internal fun BossAppDialogs(state: BossAppState) {
         )
     }
 
+    if (state.terminalOnboardingOwnerStarted) {
+        val requestGeneration = state.terminalOnboardingRequestGeneration
+        val finishTerminalOnboarding: () -> Unit =
+            remember(requestGeneration) {
+                {
+                    state.terminalOnboardingOwnerStarted = false
+                    state.focusRequester.requestFocus()
+                }
+            }
+        // Terminal Tab observes this memoized callback identity as the explicit foreground
+        // generation. Its process-wide renderer ownership guard keeps another host window from
+        // mounting the same setup PTY.
+        TerminalAPIAccess.TerminalOnboardingWizard(
+            onDismiss = finishTerminalOnboarding,
+            onComplete = finishTerminalOnboarding,
+        )
+    }
+
     // Generic dialog host for plugin dialogs
     GenericDialogHostContent()
+}
+
+@Composable
+private fun SpaceLoadPrompt(state: BossAppState) {
+    val logger = state.logger
+    state.pendingSpaceLoad?.let { pending ->
+        SpaceLoadApprovalDialog(
+            request = pending,
+            onDismiss = {
+                if (state.pendingSpaceLoad === pending) state.pendingSpaceLoad = null
+            },
+            onConfirm = confirm@{
+                // Clear before applying; the dialog also calls onDismiss after onConfirm, and a
+                // stale callback must never apply or dismiss a later request.
+                if (state.pendingSpaceLoad !== pending) return@confirm
+                state.pendingSpaceLoad = null
+                logger.info(
+                    LogCategory.WORKSPACE,
+                    "Operator confirmed an externally requested Space load",
+                    mapOf("windowId" to state.windowId, "commands" to pending.commands.size),
+                )
+                state.coroutineScope.launch {
+                    try {
+                        workspaceManager.loadWorkspace(pending.workspace)
+                        applyWorkspace(pending.workspace, state.splitViewState, state.windowProjectState)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        logger.warn(
+                            LogCategory.WORKSPACE,
+                            "Confirmed Space load failed",
+                            mapOf("path" to pending.workspacePath),
+                            error = e,
+                        )
+                    }
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -1219,5 +1380,48 @@ private fun HtmlFilePrompt(state: BossAppState) {
                 },
             )
         }
+    }
+}
+
+/**
+ * A person asked to open [project] in this window: ask where, or - when the default-Space setting
+ * says not to ask - place it straight away and let the project-selection effect apply what the
+ * setting names (None keeps the layout, a layout id applies that layout).
+ *
+ * Ask is the default, and it is the three-way dialog. The other two exist so someone who set a
+ * layout keeps the one-step open they configured, rather than being asked and then having to find
+ * that layout again under New Space.
+ */
+internal fun requestProjectOpen(
+    state: BossAppState,
+    windowProjectState: WindowProjectState,
+    project: Project,
+    showCodebase: Boolean = false,
+) {
+    if (WorkspaceSettingsManager.currentSettings.value.resolveOnProjectSelection() is ProjectSelectionWorkspace.Ask) {
+        state.projectToOpen = project
+        state.projectToOpenShowsCodebase = showCodebase
+    } else {
+        selectProjectInWindow(windowProjectState, project)
+        if (showCodebase) state.draggablePanelComponent.setPanelVisible(left.top, true)
+    }
+}
+
+/**
+ * Give this window [project], after a person answered "where" with this window.
+ *
+ * [BossAppState.answeredProjectPath] is set BEFORE the selection so the project-selection effect,
+ * which observes it a frame later, knows the question was already answered. Not set when the
+ * project is already the selected one: the path does not change, the effect never runs, and a
+ * recorded path would then wrongly swallow a later selection of it.
+ */
+private fun placeProjectHere(
+    state: BossAppState,
+    windowProjectState: WindowProjectState,
+    project: Project,
+) {
+    if (windowProjectState.selectedProject.value.path != project.path) {
+        state.answeredProjectPath = project.path
+        selectProjectInWindow(windowProjectState, project)
     }
 }

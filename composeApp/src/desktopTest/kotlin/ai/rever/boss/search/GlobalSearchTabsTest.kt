@@ -31,19 +31,17 @@ class GlobalSearchTabsTest {
     @BeforeTest
     fun setUp() {
         TopOfMindStateHolder.updateActiveTabs(emptyList())
-        GlobalSearchService.clearResults()
-        GlobalSearchService.setActiveCategory(SearchCategory.ALL)
     }
 
     @AfterTest
     fun tearDown() {
         TopOfMindStateHolder.updateActiveTabs(emptyList())
-        GlobalSearchService.clearResults()
-        GlobalSearchService.setActiveCategory(SearchCategory.ALL)
     }
 
     private fun searchFor(query: String): List<SearchResult.TabResult> =
-        runBlocking { GlobalSearchService.search(query, WINDOW) }.filterIsInstance<SearchResult.TabResult>()
+        runBlocking {
+            GlobalSearchService.search(query, WINDOW, emptyList())
+        }.filterIsInstance<SearchResult.TabResult>()
 
     private fun fluckTab(
         id: String,

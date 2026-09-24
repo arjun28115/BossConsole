@@ -103,6 +103,9 @@ object SwipeNavSettingsManager {
         parseSwipeNavEnabled(envOverride())
             ?: _settings.value.enabled
 
+    /** Installed by application startup; settings-only consumers never create native resources. */
+    internal var onEnabledChanged: ((Boolean) -> Unit)? = null
+
     fun set(enabled: Boolean) {
         _settings.value = SwipeNavSettings(enabled)
         persist(_settings.value)
@@ -111,6 +114,7 @@ object SwipeNavSettingsManager {
 
     /** Publish for the plugin half. Skipped when the environment owns the key, as elsewhere. */
     fun publish() {
+        onEnabledChanged?.invoke(isEnabled())
         if (envDecides()) {
             logger.info(LogCategory.BROWSER, "Swipe gesture setting ignored; the environment owns $KEY")
             return

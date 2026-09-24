@@ -1,10 +1,13 @@
 package ai.rever.boss.kernel
 
 import ai.rever.boss.config.SelfHealingSettingsManager
-import ai.rever.boss.ipc.BossIpcClient
 import ai.rever.boss.ipc.BossIpcServer
 import ai.rever.boss.ipc.IpcAddressResolver
+import ai.rever.boss.ipc.auth.IpcTlsIdentity
 import ai.rever.boss.ipc.auth.ProcessTokenRegistry
+import ai.rever.boss.ipc.proto.CapabilityServiceGrpcKt
+import ai.rever.boss.ipc.proto.InvokeCapabilityRequest
+import ai.rever.boss.ipc.proto.InvokeCapabilityResponse
 import ai.rever.boss.ipc.proto.OrchestratorServiceGrpcKt
 import ai.rever.boss.ipc.proto.ProcessFailureReport
 import ai.rever.boss.ipc.proto.ProcessState
@@ -402,9 +405,6 @@ class KernelBootstrap(
      */
     private val serviceAddresses = ConcurrentHashMap<String, String>()
 
-    /** Cached orchestrator channel, keyed by the address it was opened against. */
-    private var orchestratorClient: Pair<String, BossIpcClient>? = null
-
     /**
      * Initialize the kernel infrastructure. No-op in MONOLITH mode.
      */
@@ -420,8 +420,15 @@ class KernelBootstrap(
         kernelAddress = IpcAddressResolver.kernelAddress()
         val registry = ProcessRegistry()
         val tokenRegistry = ProcessTokenRegistry()
+        val kernelIdentity = IpcTlsIdentity.create()
         // The spawner registers everything it spawns, so no call site can forget to.
-        val spawner = ProcessSpawner(kernelAddress!!, registry = registry, tokenRegistry = tokenRegistry)
+        val spawner =
+            ProcessSpawner(
+                kernelAddress!!,
+                registry = registry,
+                tokenRegistry = tokenRegistry,
+                kernelIdentity = kernelIdentity,
+            )
         processRegistry = registry
         processSpawner = spawner
         processTokenRegistry = tokenRegistry
@@ -464,6 +471,9 @@ class KernelBootstrap(
                         false
                     }
                 },
+                onCapabilityInvocation = { request ->
+                    invokeRegisteredCapability(registry, request)
+                },
             )
         eventBusService = EventBusServiceImpl()
         stateService = StateServiceImpl()
@@ -483,7 +493,7 @@ class KernelBootstrap(
         // and never touches the socket. Adding a service to a running server is safe; the ordering above
         // is about existence, not about protecting streams.
         ipcServer =
-            BossIpcServer(kernelAddress!!, tokenRegistry)
+            BossIpcServer(kernelAddress!!, tokenRegistry, kernelIdentity)
                 .addService(kernelService!!)
                 .addService(eventBusService!!)
                 .addService(stateService!!)
@@ -519,6 +529,38 @@ class KernelBootstrap(
     }
 
     /**
+     * Broker a capability invocation for a child process, through the registry this
+     * kernel actually populates (#1061): the spawner registers every child and
+     * RegisterProcess completes each manifest, so this is the only place a plugin id
+     * can resolve to a live process. The per-child local registries the mastery
+     * orchestrator once built were never populated, so every mastery execution
+     * failed "Process not found".
+     */
+    private suspend fun invokeRegisteredCapability(
+        registry: ProcessRegistry,
+        request: InvokeCapabilityRequest,
+    ): InvokeCapabilityResponse {
+        val process = registry.getProcess(request.pluginId)
+        val ipcClient = process?.ipcClient
+        if (ipcClient != null) {
+            return CapabilityServiceGrpcKt
+                .CapabilityServiceCoroutineStub(ipcClient.channel)
+                .invokeCapability(request)
+        }
+        val reason =
+            if (process == null) {
+                "Process not found: ${request.pluginId}"
+            } else {
+                "No IPC client for process: ${request.pluginId}"
+            }
+        return InvokeCapabilityResponse
+            .newBuilder()
+            .setSuccess(false)
+            .setErrorMessage(reason)
+            .build()
+    }
+
+    /**
      * Decide what to do about a crashed child, and do it.
      *
      * The orchestrator gets first say — it runs the analyzer, the escalation ladder and the
@@ -536,6 +578,12 @@ class KernelBootstrap(
         spawner: ProcessSpawner,
         failure: ProcessFailure,
     ) {
+        // The dead child's registration in the kernel service must go now: it is otherwise
+        // removed only on a successful requestShutdown, so a dead id would keep reporting
+        // RUNNING and every later child would keep receiving its stale ipcAddress (#1180).
+        // Evicted before any respawn so the replacement's fresh registration is never dropped.
+        kernelService?.deregisterProcess(failure.processId)
+
         val process = registry.getProcess(failure.processId)
         if (process == null || process.config.restartPolicy != RestartPolicy.ON_FAILURE) {
             logger.error(
@@ -580,14 +628,13 @@ class KernelBootstrap(
     /**
      * Ask the orchestrator how to repair [failure], or null when it cannot be asked in time.
      */
-    private suspend fun requestRepairAdvice(
+    internal suspend fun requestRepairAdvice(
         registry: ProcessRegistry,
         failure: ProcessFailure,
     ): RepairAction? {
         // Never ask the orchestrator to diagnose its own death, and never wait on one that has
         // not registered an address yet.
-        val stub = if (failure.processId == ORCHESTRATOR_PROCESS_ID) null else orchestratorStub()
-        if (stub == null) return null
+        if (failure.processId == ORCHESTRATOR_PROCESS_ID) return null
 
         val report =
             ProcessFailureReport
@@ -602,38 +649,16 @@ class KernelBootstrap(
                 .apply { registry.getManifest(failure.processId)?.let { setManifest(it) } }
                 .build()
 
-        return try {
+        return repairAdviceOrNull(failure.processId) {
+            // Obtaining the channel is fallible too: dead handles remain in the registry.
+            val stub = adviserStub(registry) ?: return@repairAdviceOrNull null
             withTimeoutOrNull(REPAIR_ADVICE_TIMEOUT_MS) { stub.reportFailure(report) }
-                ?: run {
-                    logger.warn(
-                        "Orchestrator did not answer within {}ms for {} - recovering without advice",
-                        REPAIR_ADVICE_TIMEOUT_MS,
-                        failure.processId,
-                    )
-                    null
-                }
-        } catch (e: Exception) {
-            logger.warn(
-                "Could not reach the orchestrator for {} ({}) - recovering without advice",
-                failure.processId,
-                e.message,
-            )
-            null
         }
     }
 
     /** A stub for the running orchestrator, or null while it has no registered address. */
-    private fun orchestratorStub(): OrchestratorServiceGrpcKt.OrchestratorServiceCoroutineStub? {
-        val address = serviceAddresses[ORCHESTRATOR_PROCESS_ID] ?: return null
-        val cached = orchestratorClient
-        // Re-dial when the orchestrator comes back at a new address; the old channel is dead.
-        val client =
-            if (cached != null && cached.first == address) {
-                cached.second
-            } else {
-                cached?.second?.runCatching { shutdown() }
-                BossIpcClient(address).also { orchestratorClient = address to it }
-            }
+    private fun adviserStub(registry: ProcessRegistry): OrchestratorServiceGrpcKt.OrchestratorServiceCoroutineStub? {
+        val client = registry.getProcess(ORCHESTRATOR_PROCESS_ID)?.ipcClient ?: return null
         return OrchestratorServiceGrpcKt.OrchestratorServiceCoroutineStub(client.channel)
     }
 
@@ -925,10 +950,7 @@ class KernelBootstrap(
         // restart would otherwise come up still holding claims from processes that are now dead.
         RemoteUiSurfaceRegistry.shared.clear()
 
-        // 5. Close the orchestrator channel. Nothing else owns it, so a mode switch or in-process
-        // restart would otherwise leak the channel and its threads.
-        orchestratorClient?.second?.shutdown()
-        orchestratorClient = null
+        // 5. Channels were closed with their owning managed processes above.
         serviceAddresses.clear()
 
         // 6. Cancel scope

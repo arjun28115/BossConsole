@@ -2,6 +2,8 @@
 
 package ai.rever.boss.utils
 
+import ai.rever.boss.health.WorkspaceHealthCollector
+import ai.rever.boss.health.toJson
 import ai.rever.boss.plugin.api.McpToolResult
 import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.utils.logging.BossLogger
@@ -17,6 +19,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.net.ConnectException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.StandardProtocolFamily
@@ -71,6 +74,29 @@ internal const val VERB_MCP_LIST = "MCP_LIST"
 /** Asks the running instance to invoke an MCP tool. */
 internal const val VERB_MCP_INVOKE = "MCP_INVOKE"
 
+/** Asks the running instance to reload a plugin in development mode. */
+internal const val VERB_PLUGIN_DEV_RELOAD = "PLUGIN_DEV_RELOAD"
+
+sealed interface ReloadResult {
+    data object Success : ReloadResult
+
+    data class HostOffline(
+        val message: String = "BossConsole is not running",
+    ) : ReloadResult
+
+    /**
+     * The host is running but did not confirm the reload within the client budget. The reload
+     * may still be in progress on the host; the staged JAR is on disk for the next launch.
+     */
+    data class TimedOut(
+        val message: String,
+    ) : ReloadResult
+
+    data class Failed(
+        val reason: String,
+    ) : ReloadResult
+}
+
 internal const val RESPONSE_OK = "OK"
 internal const val RESPONSE_PONG = "PONG"
 internal const val RESPONSE_REJECTED = "REJECTED"
@@ -97,6 +123,11 @@ private const val MCP_INVOKE_TIMEOUT_MS = 60000L
 // still close a genuinely wedged connection rather than race it.
 private const val OPEN_ACTION_TIMEOUT_MS = 5000L
 
+// A dev reload on the host unloads the running instance and installs fresh bytes.
+// This is the client budget: above anything a healthy reload spends, below the
+// 60s server connection budget the verb gets from isLongerBudgetCandidate.
+internal const val PLUGIN_DEV_RELOAD_TIMEOUT_MS = 45_000L
+
 /**
  * Ceiling on a single request. Bounds what one caller can make the app buffer,
  * sized to accommodate Base64-encoded tool arguments and payloads.
@@ -107,8 +138,8 @@ internal const val MAX_REQUEST_BYTES = 1024 * 1024
 internal const val MAX_ARGUMENT_BYTES = 768 * 1024 - 1024
 internal const val MAX_TOOL_NAME_LENGTH = 256
 
-/** A response is one short word; nothing legitimate approaches this. */
-private const val MAX_RESPONSE_BYTES = 256
+/** A response ceiling expanded to 1024 bytes to support diagnostic dev reload error payloads. */
+internal const val MAX_RESPONSE_BYTES = 1024
 
 /** Ceiling on data responses (status, MCP tool list, Base64 tool invocation output). */
 private const val MAX_DATA_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -218,8 +249,11 @@ internal data class SingleInstanceRequest(
  *
  * The line is `<protocol> <token> <verb> ...`
  */
+@Suppress("ReturnCount")
 internal fun parseRequestLine(line: String): SingleInstanceRequest? {
-    val parts = line.trim().split(' ', limit = 5)
+    val trimmed = line.trim()
+    val parts = trimmed.split(' ', limit = 5)
+
     if (parts.size < 3 || parts[0] != PROTOCOL_VERSION) return null
 
     val token = parts[1]
@@ -244,6 +278,15 @@ internal fun parseRequestLine(line: String): SingleInstanceRequest? {
             parseMcpInvokeRequest(token, parts)
         }
 
+        VERB_PLUGIN_DEV_RELOAD -> {
+            val pluginId = parts.getOrNull(3).orEmpty()
+            if (validPluginDevId(pluginId)) {
+                SingleInstanceRequest(token, VERB_PLUGIN_DEV_RELOAD, DeepLinkOrigin.OPERATOR_CLI, null, pluginId)
+            } else {
+                null
+            }
+        }
+
         else -> {
             null
         }
@@ -252,6 +295,16 @@ internal fun parseRequestLine(line: String): SingleInstanceRequest? {
 
 private fun validMcpToolName(toolName: String): Boolean =
     toolName.length in 1..MAX_TOOL_NAME_LENGTH && toolName.none { it.isWhitespace() || it.isISOControl() }
+
+/**
+ * A plugin id crosses the wire as a bare token and the host joins it straight onto
+ * the dev staging root, so it must never carry a path separator or traverse out of it.
+ * Whitespace cannot survive the wire format anyway; the separators and `..` can.
+ */
+private fun validPluginDevId(pluginId: String): Boolean =
+    pluginId.length in 1..MAX_TOOL_NAME_LENGTH &&
+        pluginId.none { it.isWhitespace() || it.isISOControl() || it == '/' || it == '\\' } &&
+        pluginId != ".." && pluginId != "."
 
 private fun parseMcpInvokeRequest(
     token: String,
@@ -696,8 +749,15 @@ private fun buildLlmTokenResponse(providerOverride: (() -> Result<String>)?): St
     )
 }
 
+/**
+ * The STATUS response. [healthJson] is a parameter so a test can check that the real response carries
+ * the health report without starting a browser engine or reading the MCP files.
+ */
 @Suppress("TooGenericExceptionCaught")
-private fun buildStatusResponse(statusProviderOverride: (() -> String)?): String {
+internal fun buildStatusResponse(
+    statusProviderOverride: (() -> String)?,
+    healthJson: () -> JsonObject = { WorkspaceHealthCollector().collect().toJson() },
+): String {
     val rawJson =
         if (statusProviderOverride != null) {
             statusProviderOverride.invoke()
@@ -732,6 +792,8 @@ private fun buildStatusResponse(statusProviderOverride: (() -> String)?): String
                             put("heapPercent", heapPercent)
                         },
                     )
+                    // Never throws: a health source that cannot be read is reported as unchecked.
+                    put("health", healthJson())
                 }.toString()
             } catch (e: Exception) {
                 return RESPONSE_ERROR_PREFIX + (e.message ?: "Failed to query status")
@@ -808,6 +870,43 @@ private fun buildMcpInvokeResponse(
     }
 }
 
+private fun buildPluginDevReloadResponse(
+    pluginId: String,
+    handler: ((String) -> Boolean)?,
+): String {
+    if (pluginId.isBlank()) {
+        return "RELOAD_FAILED Missing pluginId parameter"
+    }
+    val result =
+        runCatching {
+            checkNotNull(handler) { "Development plugin reload is not available in this host" }.invoke(pluginId)
+        }
+    return result.fold(
+        onSuccess = { success ->
+            if (success) {
+                "RELOAD_OK $pluginId"
+            } else {
+                "RELOAD_FAILED Failed to reload plugin $pluginId"
+            }
+        },
+        onFailure = { error ->
+            val rootCause =
+                generateSequence(error) { it.cause?.takeIf { cause -> cause !== it } }
+                    .take(15)
+                    .last()
+            val errorName = rootCause::class.simpleName ?: "Error"
+            val errorDetail = rootCause.message ?: error.message ?: "No detailed cause"
+            val sanitizedMessage =
+                "$errorName: $errorDetail"
+                    .replace(Regex("[\\r\\n]+"), " ")
+                    .take(400)
+            val recoveryWarning =
+                if (error.suppressedExceptions.isNotEmpty()) "Rollback failed; check the host log. " else ""
+            "RELOAD_FAILED $recoveryWarning$sanitizedMessage"
+        },
+    )
+}
+
 internal fun encodeMcpTools(tools: List<ai.rever.boss.plugin.api.RegisteredMcpTool>): String =
     JsonArray(
         tools.map { registeredTool ->
@@ -823,12 +922,42 @@ internal fun encodeMcpTools(tools: List<ai.rever.boss.plugin.api.RegisteredMcpTo
         },
     ).toString()
 
-private fun parseToolSchema(schema: String): kotlinx.serialization.json.JsonElement =
-    try {
-        Json.parseToJsonElement(schema)
-    } catch (_: IllegalArgumentException) {
-        JsonPrimitive(schema)
+private const val MAX_CACHED_TOOL_SCHEMAS = 128
+private const val MAX_CACHED_TOOL_SCHEMA_CHARS = 64 * 1024
+private typealias ToolSchemaCacheEntry = MutableMap.MutableEntry<String, kotlinx.serialization.json.JsonElement>
+
+/**
+ * Bounded because schemas are supplied by reloadable plugins and can change on every registration.
+ * IPC callers can only read the registry and cannot add keys. Schemas over 64 KiB bypass retention,
+ * bounding retained source text to roughly 8 MiB plus parsed-tree overhead.
+ */
+private val schemaCache =
+    object : LinkedHashMap<String, kotlinx.serialization.json.JsonElement>(MAX_CACHED_TOOL_SCHEMAS, 0.75f, true) {
+        override fun removeEldestEntry(eldest: ToolSchemaCacheEntry): Boolean = size > MAX_CACHED_TOOL_SCHEMAS
     }
+
+internal fun clearToolSchemaCache() = synchronized(schemaCache) { schemaCache.clear() }
+
+internal fun parseToolSchema(schema: String): kotlinx.serialization.json.JsonElement {
+    fun parse() =
+        try {
+            Json.parseToJsonElement(schema)
+        } catch (_: IllegalArgumentException) {
+            JsonPrimitive(schema)
+        }
+
+    return if (schema.length > MAX_CACHED_TOOL_SCHEMA_CHARS) {
+        parse()
+    } else {
+        val cached = synchronized(schemaCache) { schemaCache[schema] }
+        cached ?: run {
+            val parsed = parse()
+            synchronized(schemaCache) {
+                schemaCache[schema] ?: parsed.also { schemaCache[schema] = it }
+            }
+        }
+    }
+}
 
 internal fun encodeMcpResult(
     toolName: String,
@@ -882,6 +1011,8 @@ private fun acceptNextClient(
     }
 
 private fun pluginActionResponse(verdict: kotlinx.coroutines.Deferred<Boolean>?): String {
+    // Null is the queued verdict for an external action held for confirmation. Nothing has run,
+    // but the running instance accepted responsibility for asking the operator.
     if (verdict == null) return RESPONSE_OK
     val handled = kotlinx.coroutines.runBlocking { awaitPluginAction(verdict, OPEN_ACTION_TIMEOUT_MS) }
     return when (handled) {
@@ -948,12 +1079,25 @@ object SingleInstanceManager {
     /** Test seam / host hook for MCP tool invocation response. */
     internal var mcpInvokeHandlerOverride: (suspend (String, String) -> McpToolResult)? = null
 
+    /** Test seam / host hook for dev plugin reload response. */
+    internal var pluginReloadHandlerOverride: ((String) -> Boolean)? = null
+
     @Volatile
     private var isListening: Boolean = false
 
     /** The descriptor this process published, or null when it is not the owner. */
     @Volatile
     private var published: InstanceDescriptor? = null
+
+    /**
+     * Whether this process holds the single-instance claim - it won
+     * [acquireLock] and has not been [release]d. Destructive startup cleanup
+     * (FluckEngine's stale-Chromium sweep) consults this: the sweep matches
+     * processes by shared data-dir paths, so a process that lost - or never
+     * took - the claim must not run it against the owning instance's tree.
+     */
+    val isInstanceOwner: Boolean
+        get() = published != null
 
     /** Runtime directory override for tests; see [SingleInstanceFiles.runtimeDirOverride]. */
     internal var runtimeDirOverride: File?
@@ -1091,7 +1235,11 @@ object SingleInstanceManager {
 
     private val isLongerBudgetCandidate: (SingleInstanceRequest) -> Boolean
         get() = { request ->
-            (request.verb == VERB_LLM_TOKEN || request.verb == VERB_MCP_INVOKE) && presentsLiveToken(request)
+            (
+                request.verb == VERB_LLM_TOKEN ||
+                    request.verb == VERB_MCP_INVOKE ||
+                    request.verb == VERB_PLUGIN_DEV_RELOAD
+            ) && presentsLiveToken(request)
         }
 
     /**
@@ -1110,6 +1258,7 @@ object SingleInstanceManager {
      * back. A request that does not present the live token is refused here,
      * before its contents mean anything.
      */
+    @Suppress("TooGenericExceptionCaught", "CyclomaticComplexMethod")
     private fun responseFor(request: SingleInstanceRequest?): String {
         if (request == null || !presentsLiveToken(request)) {
             logger.warn(LogCategory.SYSTEM, "Refused a malformed single-instance request or missing channel token")
@@ -1156,6 +1305,10 @@ object SingleInstanceManager {
                 val toolName = request.toolName.orEmpty()
                 val argsJson = request.argsJson.orEmpty()
                 buildMcpInvokeResponse(toolName, argsJson, mcpInvokeHandlerOverride)
+            }
+
+            request.verb == VERB_PLUGIN_DEV_RELOAD -> {
+                buildPluginDevReloadResponse(request.toolName.orEmpty(), pluginReloadHandlerOverride)
             }
 
             else -> {
@@ -1360,10 +1513,12 @@ object SingleInstanceManager {
      *   process from the OS.
      * @return true if the running instance acknowledged it. For most links this
      *   still means only "queued" (fire-and-forget, as before); for a
-     *   `boss://plugin?id=…&action=…` link it now means the registered handler
-     *   reported the action handled. An unregistered handler id, a declined
-     *   action, or an unknown outcome at timeout returns false. This is not a
-     *   guarantee that asynchronous work started by a handler has completed.
+     *   `boss://plugin?id=…&action=…` link from [DeepLinkOrigin.OPERATOR_CLI] it
+     *   means the registered handler reported the action handled. For the default
+     *   external origin it means the action was queued for confirmation and has not
+     *   run. A refused action, an unregistered handler on the operator path, or an
+     *   unknown outcome at timeout returns false. This is not a guarantee that
+     *   asynchronous work started by a handler has completed.
      */
     fun sendToExistingInstance(
         url: String,
@@ -1397,6 +1552,69 @@ object SingleInstanceManager {
     }
 
     /**
+     * Dispatches dev reload signal for [pluginId] to the running BossConsole instance
+     * with synchronous request-response verification and timeout handling.
+     *
+     * A response that never arrives is split into its two causes: nothing answering the
+     * channel means the host is offline, while a host that answers a probe but not the
+     * reload is busy, and the staged JAR is still picked up at the next launch.
+     */
+    @Suppress("ReturnCount")
+    fun reloadDevPlugin(
+        pluginId: String,
+        timeoutMs: Int = PLUGIN_DEV_RELOAD_TIMEOUT_MS.toInt(),
+    ): ReloadResult {
+        if (!validPluginDevId(pluginId)) {
+            return ReloadResult.Failed("Invalid plugin id for dev reload: '$pluginId'")
+        }
+        val target =
+            SingleInstanceFiles.read()
+                ?: return ReloadResult.HostOffline("BossConsole is not running.")
+        val message = "$PROTOCOL_VERSION ${target.token} $VERB_PLUGIN_DEV_RELOAD $pluginId"
+        return try {
+            val response =
+                SingleInstanceWire.exchange(
+                    target,
+                    message,
+                    timeoutMs = timeoutMs.toLong(),
+                    maxResponseBytes = MAX_RESPONSE_BYTES,
+                ) ?: return if (SingleInstanceWire.respondsToPing(target)) {
+                    ReloadResult.TimedOut(
+                        "BossConsole is running but did not confirm the reload within $timeoutMs ms; " +
+                            "it may still be reloading",
+                    )
+                } else {
+                    ReloadResult.HostOffline("BossConsole is offline or the channel stopped answering")
+                }
+
+            when {
+                response == "RELOAD_OK $pluginId" -> {
+                    ReloadResult.Success
+                }
+
+                response.startsWith("RELOAD_FAILED") -> {
+                    ReloadResult.Failed(response.removePrefix("RELOAD_FAILED").trim())
+                }
+
+                else -> {
+                    ReloadResult.Failed("Malformed IPC response: $response")
+                }
+            }
+        } catch (
+            @Suppress("SwallowedException") e: ConnectException,
+        ) {
+            logger.debug(
+                LogCategory.SYSTEM,
+                "IPC host connection refused; host is offline",
+                mapOf("pluginId" to pluginId),
+            )
+            ReloadResult.HostOffline("BossConsole is offline (connection refused)")
+        } catch (e: Exception) {
+            ReloadResult.Failed("IPC communication error: ${e.message}")
+        }
+    }
+
+    /**
      * Start listening for URLs from new instances.
      *
      * Note: the channel is already listening once [acquireLock] succeeds; this
@@ -1420,6 +1638,7 @@ object SingleInstanceManager {
         statusProviderOverride = null
         mcpListProviderOverride = null
         mcpInvokeHandlerOverride = null
+        pluginReloadHandlerOverride = null
 
         try {
             serverChannel?.close()
