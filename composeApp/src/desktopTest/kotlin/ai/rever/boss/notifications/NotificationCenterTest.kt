@@ -345,4 +345,52 @@ class NotificationCenterTest {
                 "a label of only control characters behaves like a blank one",
             )
         }
+
+    // -----------------------------------------------------------------
+    // Size bounds live here, so a host publisher meets them as the MCP tool does (#1644 review).
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `post refuses an over-long title or message from any origin and stores nothing`(): Unit =
+        runBlocking {
+            val longTitle = "t".repeat(NotificationCenter.MAX_TITLE_CHARS + 1)
+            val longMessage = "m".repeat(NotificationCenter.MAX_MESSAGE_CHARS + 1)
+            for (origin in NotificationOrigin.entries) {
+                assertFailsWith<IllegalArgumentException>("$origin title") {
+                    NotificationCenter.post(longTitle, origin = origin)
+                }
+                assertFailsWith<IllegalArgumentException>("$origin message") {
+                    NotificationCenter.post("ok", message = longMessage, origin = origin)
+                }
+            }
+            assertTrue(NotificationCenter.notifications.value.isEmpty(), "a refused post must store nothing")
+        }
+
+    @Test
+    fun `fields exactly at their limits are accepted`(): Unit =
+        runBlocking {
+            val posted =
+                NotificationCenter.post(
+                    "t".repeat(NotificationCenter.MAX_TITLE_CHARS),
+                    message = "m".repeat(NotificationCenter.MAX_MESSAGE_CHARS),
+                    source = "s".repeat(NotificationCenter.MAX_SOURCE_LABEL_CHARS),
+                    origin = NotificationOrigin.HOST,
+                )
+            assertEquals(NotificationCenter.MAX_MESSAGE_CHARS, posted.message.length)
+        }
+
+    /** An agent's label is cut, because the agent is not ours to fix; a host label that long is a bug. */
+    @Test
+    fun `an over-long source label is refused from the host and truncated from an agent`(): Unit =
+        runBlocking {
+            val longLabel = "x".repeat(NotificationCenter.MAX_SOURCE_LABEL_CHARS + 1)
+
+            assertFailsWith<IllegalArgumentException> {
+                NotificationCenter.post("Host", source = longLabel, origin = NotificationOrigin.HOST)
+            }
+            val fromAgent = NotificationCenter.post("Agent", source = longLabel, origin = NotificationOrigin.AGENT)
+
+            val prefix = "${NotificationCenter.AGENT_SOURCE_PREFIX}: "
+            assertEquals(prefix + "x".repeat(NotificationCenter.MAX_SOURCE_LABEL_CHARS), fromAgent.source)
+        }
 }

@@ -113,6 +113,13 @@ object NotificationCenter {
      * presentation is host code explicitly claiming [NotificationOrigin.HOST], which is a
      * review-visible act. A demoted label is bounded to [MAX_SOURCE_LABEL_CHARS] so agent text
      * cannot turn the provenance-adjacent field into unbounded storage.
+     *
+     * **The size bounds are enforced here too, for every publisher.** The inbox is rewritten in full
+     * on every post and listed without approval, whoever wrote to it, so [MAX_TITLE_CHARS] and
+     * [MAX_MESSAGE_CHARS] are refused at this boundary rather than only in the MCP tool, which checks
+     * first to name the limit to its caller. A host label longer than [MAX_SOURCE_LABEL_CHARS] is
+     * refused rather than truncated: an agent's label is cut because the agent is not ours to fix,
+     * while a host label that long is a bug to catch at the call site that writes it.
      */
     suspend fun post(
         title: String,
@@ -122,6 +129,11 @@ object NotificationCenter {
         origin: NotificationOrigin,
     ): BossNotification {
         require(title.isNotBlank()) { "Notification title must not be blank" }
+        require(title.length <= MAX_TITLE_CHARS) { "Notification title is over $MAX_TITLE_CHARS characters" }
+        require(message.length <= MAX_MESSAGE_CHARS) { "Notification message is over $MAX_MESSAGE_CHARS characters" }
+        require(origin != NotificationOrigin.HOST || source.trim().length <= MAX_SOURCE_LABEL_CHARS) {
+            "A host notification's source label is over $MAX_SOURCE_LABEL_CHARS characters"
+        }
         return mutex.withLock {
             val entry =
                 BossNotification(
@@ -155,6 +167,12 @@ object NotificationCenter {
      * input from turning the field into unbounded storage.
      */
     const val MAX_SOURCE_LABEL_CHARS = 80
+
+    /** A headline, not a body. Enforced by [post] for every publisher. */
+    const val MAX_TITLE_CHARS = 200
+
+    /** About a page of text: enough for "the migration finished, here is what changed". Enforced by [post]. */
+    const val MAX_MESSAGE_CHARS = 4_000
 
     /**
      * Characters a demoted label may not keep: every ISO control character (newline, carriage
