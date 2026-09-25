@@ -88,9 +88,11 @@ allprojects {
     // What a failure looks like: a DiscoveryIssueException aborts discovery for the whole engine,
     // so every test in the module vanishes and one initializationError is reported in their place.
     // Its message names the method. If a toolchain bump (JUnit, Compose, the vintage engine)
-    // introduces an unrelated WARNING, relax this to "ERROR" for that module while it is fixed,
-    // rather than deleting the line. composeApp also carries the same setting in
-    // src/desktopTest/resources/junit-platform.properties, so an IDE run meets it too.
+    // introduces an unrelated WARNING, relax it to "ERROR" for that module while it is fixed, rather
+    // than deleting this line: set the same property in that module's own build.gradle.kts, whose
+    // Test configuration runs after this one and wins. composeApp also carries the setting in
+    // src/desktopTest/resources/junit-platform.properties, so an IDE run meets it too, and buildSrc,
+    // a separate build this block never reaches, carries its own copy.
     tasks.withType<Test>().configureEach {
         systemProperty("junit.platform.discovery.issue.severity.critical", "WARNING")
     }

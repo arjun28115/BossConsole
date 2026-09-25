@@ -16,4 +16,8 @@ dependencies {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    // buildSrc is a separate build, so the root build.gradle.kts guard does not reach it: fail on a
+    // @Test JUnit will not execute (a value-returning one is skipped with a warning otherwise).
+    // CI runs these tests in the dedicated `./gradlew -p buildSrc test` step of build.yml.
+    systemProperty("junit.platform.discovery.issue.severity.critical", "WARNING")
 }

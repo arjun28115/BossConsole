@@ -45,11 +45,13 @@ described the code by the time it first ran (#1667). Declare an expression-bodie
 or write `runBlocking<Unit>`, as `plugin-loader`'s tests already do.
 
 Every module's Gradle `Test` task now sets `junit.platform.discovery.issue.severity.critical=WARNING`
-(root `build.gradle.kts`), and `composeApp` repeats it in
+(root `build.gradle.kts`), `buildSrc` sets it in its own build file because it is a separate build
+the root never reaches, and `composeApp` repeats it in
 `src/desktopTest/resources/junit-platform.properties` so an IDE run meets it too. A discovery issue
 aborts discovery for the whole engine: every test in the module disappears and a single
 `initializationError` names the method. If a toolchain bump introduces an unrelated warning, relax
-the property to `ERROR` for that module while it is fixed; do not delete it.
+the property to `ERROR` in that module's own `build.gradle.kts`, which wins over the root; do not
+delete it.
 
 ### Running commands in a visible terminal pane
 

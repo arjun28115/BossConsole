@@ -22,8 +22,8 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.attribute.BasicFileAttributes
 import kotlin.test.Test
-import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+import kotlin.test.fail
 
 /**
  * Each settings and state writer REPLACES its file on save rather than truncating and rewriting it:
@@ -56,6 +56,11 @@ import kotlin.test.assertTrue
  *   background loads then read instead of writing, so no replace of the manager's own can land
  *   between the reads. Without this a save reverted to `writeText` could still pass, because
  *   the background write would change the identity for it.
+ *
+ * **The measured save is assumed to write unconditionally**, as all thirteen writers do today: all
+ * but the installed-plugins case save the bytes already on disk. A writer that learns to skip a
+ * write whose content has not changed would fail here as "not written at all"; give its case a real
+ * change to save, as the installed-plugins case does, rather than weakening the check.
  */
 class SettingsAtomicReplaceTest {
     private fun identity(file: File): Any? {
@@ -86,16 +91,24 @@ class SettingsAtomicReplaceTest {
         Files.createLink(pin.toPath(), file.toPath())
         try {
             val before = identity(pin)
+            val modifiedBefore = Files.getLastModifiedTime(pin.toPath())
 
             save()
 
-            val after = identity(file)
-            assertNotEquals(
-                before,
-                after,
-                "${file.name} must be replaced by an atomic rename, not truncated and rewritten in place " +
-                    "(identity before $before, after $after)",
-            )
+            if (identity(file) == before) {
+                // Tell the two ways to keep an identity apart: these writers log a failed save and
+                // swallow it, so "not written at all" must not send a reader hunting for a writeText.
+                val rewritten = Files.getLastModifiedTime(file.toPath()) != modifiedBefore
+                fail(
+                    if (rewritten) {
+                        "${file.name} was truncated and rewritten in place (identity $before kept, modified time " +
+                            "changed); it must be replaced by an atomic rename"
+                    } else {
+                        "${file.name} was not written at all by the measured save (identity $before and modified " +
+                            "time unchanged): look for a logged, swallowed save failure, or a write the writer skipped"
+                    },
+                )
+            }
         } finally {
             pin.delete()
         }
@@ -149,8 +162,18 @@ class SettingsAtomicReplaceTest {
 
     /** Resolved through the manager's own path, which other tests point at a file of their own. */
     @Test
-    fun `default apps settings are replaced on save, never rewritten in place`() =
-        assertReplacedOnSave(DefaultAppsSettingsManager.settingsFile) { DefaultAppsSettingsManager.markPromptShown() }
+    fun `default apps settings are replaced on save, never rewritten in place`() {
+        // The one case that changes shared state rather than re-saving it, so it puts both back:
+        // markPromptShown sets the process-global flag, and the test-home file records it.
+        val file = DefaultAppsSettingsManager.settingsFile
+        val original = file.takeIf { it.exists() }?.readBytes()
+        try {
+            assertReplacedOnSave(file) { DefaultAppsSettingsManager.markPromptShown() }
+        } finally {
+            if (original == null) file.delete() else file.writeBytes(original)
+            DefaultAppsSettingsManager.resetForTest()
+        }
+    }
 
     /** Resolved through the manager's own path, which other tests point at a file of their own. */
     @Test
