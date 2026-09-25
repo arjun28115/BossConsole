@@ -35,6 +35,22 @@ runs race a stale `recent-projects.json` load. This guarantee is deliberately mo
 moving a test that reads `BossDirectories.rootDir` to another module requires equivalent isolation
 there.
 
+### A `@Test` that returns a value never runs
+
+`fun x() = runBlocking { ...; assertIs<T>(y) }` returns whatever its last expression does, and JUnit
+Jupiter does not execute a `@Test` method that returns a value: it reports a WARNING-level discovery
+issue, which Gradle does not print, and counts the method nowhere. Nine `composeApp` tests sat
+unexecuted that way, four of them the MCP approval gate's fail-closed guarantees, and one no longer
+described the code by the time it first ran (#1667). Declare an expression-bodied test `(): Unit =`,
+or write `runBlocking<Unit>`, as `plugin-loader`'s tests already do.
+
+Every module's Gradle `Test` task now sets `junit.platform.discovery.issue.severity.critical=WARNING`
+(root `build.gradle.kts`), and `composeApp` repeats it in
+`src/desktopTest/resources/junit-platform.properties` so an IDE run meets it too. A discovery issue
+aborts discovery for the whole engine: every test in the module disappears and a single
+`initializationError` names the method. If a toolchain bump introduces an unrelated warning, relax
+the property to `ERROR` for that module while it is fixed; do not delete it.
+
 ### Running commands in a visible terminal pane
 
 When a terminal MCP server is available, prefer it over the plain `Bash` tool for commands worth showing - it runs in a visible BossTerm pane and still returns stdout/stderr/exit code. Two servers may be present depending on which app hosts the session; use whichever the session's `SessionStart` hook designates:
