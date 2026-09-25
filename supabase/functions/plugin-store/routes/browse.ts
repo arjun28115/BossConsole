@@ -1,5 +1,4 @@
-import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi"
-import type { PluginStoreContext } from "../types/context.ts"
+import { createRoute, z } from "@hono/zod-openapi"
 import {
   ListPluginsQuerySchema,
   SearchPluginsRequestSchema,
@@ -12,25 +11,11 @@ import {
 import { listPlugins, searchPlugins, getPlugin, getPopularTags } from "../services/plugins.ts"
 import { getPluginVersions } from "../services/versions.ts"
 import { clientKey, rateLimit } from "../utils/rate-limit.ts"
+import { newRouter } from "../utils/router.ts"
 
-// A request that fails its route's schema is answered here, before any handler runs, so these are
-// the 400s every route below declares. Without a hook the validator answers with its own body,
-// { success: false, error: <ZodError> }, which is not the ErrorResponseSchema the routes promise.
-const browse = new OpenAPIHono<{ Variables: PluginStoreContext }>({
-  defaultHook: (result, ctx) => {
-    if (!result.success) {
-      return ctx.json({ error: invalidRequestMessage(result.error) }, 400)
-    }
-  },
-})
-
-/** The first schema issue, named by its field, as the one-line `error` of ErrorResponseSchema. */
-function invalidRequestMessage(error: z.ZodError): string {
-  const issue = error.issues[0]
-  if (!issue) return "Invalid request"
-  const field = issue.path.join(".")
-  return field ? `Invalid ${field}: ${issue.message}` : `Invalid request: ${issue.message}`
-}
+// A request that fails its route's schema is answered by the router itself, before any handler
+// runs, with the ErrorResponseSchema 400 the routes below declare: see newRouter.
+const browse = newRouter()
 
 // Per-client limit on the anonymous catalogue routes (/list, /search,
 // /tags/popular): the same in-isolate token bucket the organisation function
