@@ -53,6 +53,14 @@ aborts discovery for the whole engine: every test in the module disappears and a
 the property to `ERROR` in that module's own `build.gradle.kts`, which wins over the root; do not
 delete it.
 
+**The property is only read by JUnit Platform 1.13 and later.** On an older platform it is silently
+ignored, the guard does nothing, and a passing test run looks exactly the same as a working guard.
+That is why `buildSrc` imports the root version catalog and pins `platform(junit-bom)` to
+`libs.versions.junit.jupiter` (#1709): its only other test dependency, `kotlin("test")`, resolves
+JUnit through Gradle's embedded Kotlin (Platform 1.10), and the guard there was inert until the pin.
+The BOM is not a redundant dependency; removing it restores the inert guard. To check a module, run
+a throwaway `@Test fun probe() = 42` and confirm the run fails with "must not return a value".
+
 ### Running commands in a visible terminal pane
 
 When a terminal MCP server is available, prefer it over the plain `Bash` tool for commands worth showing - it runs in a visible BossTerm pane and still returns stdout/stderr/exit code. Two servers may be present depending on which app hosts the session; use whichever the session's `SessionStart` hook designates:
