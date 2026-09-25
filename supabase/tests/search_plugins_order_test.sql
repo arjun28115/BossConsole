@@ -5,7 +5,7 @@
 -- the name (the old constant sort key) or ignored the tiebreak cannot pass by coincidence.
 
 begin;
-select plan(11);
+select plan(15);
 
 -- ---------------------------------------------------------------------------
 -- Fixtures: five published public plugins, filtered to with p_query => 'test.order'.
@@ -65,8 +65,8 @@ select is(pg_temp.page_ids('downloads', 1, 2) || pg_temp.page_ids('downloads', 2
 select is(pg_temp.page_ids('rating', 1, 20),
     array['test.order.a', 'test.order.b', 'test.order.c', 'test.order.d', 'test.order.e'],
     'a rating sort with every rating equal falls back to plugin_id too');
-select is(pg_temp.page_ids('downloads', 1, 20), pg_temp.page_ids('downloads', 1, 20),
-    'the same request twice gives the same order');
+select is(pg_temp.page_ids('downloads', 1, 2), (pg_temp.page_ids('downloads', 1, 5))[1:2],
+    'the first page is the same rows whatever the page size, which an unordered tie cannot promise');
 
 -- ---------------------------------------------------------------------------
 -- What must not change: the count, the JSON shape, the page bounds.
@@ -87,6 +87,38 @@ select is(pg_temp.page_ids('name', 3, 2), array['test.order.a'],
     'the last page holds what is left');
 select is(pg_temp.page_ids('name', 4, 2), '{}'::text[],
     'a page past the end is empty');
+
+-- ---------------------------------------------------------------------------
+-- The filter block is written twice, once for total_count and once for the page, so each filter
+-- is checked on both: a copy that dropped a filter from one of them would make the count and the
+-- page disagree while every other assertion here stayed green.
+-- ---------------------------------------------------------------------------
+insert into public.plugin_tags (plugin_id, tag)
+select p.id, 'pgorder-tagged' from public.plugins p where p.plugin_id in ('test.order.b', 'test.order.d');
+update public.plugins set verified = true where plugin_id = 'test.order.c';
+
+select is(
+    (select array_agg(e->>'pluginId' order by ord) from public.search_plugins_internal(
+        p_viewer_id => null, p_query => 'test.order', p_tags => array['pgorder-tagged'], p_sort_by => 'name') s,
+        jsonb_array_elements(s.plugins) with ordinality as t(e, ord)),
+    array['test.order.b', 'test.order.d'],
+    'a tag filter returns only the tagged plugins, in name order');
+select is(
+    (select total_count from public.search_plugins_internal(
+        p_viewer_id => null, p_query => 'test.order', p_tags => array['pgorder-tagged'])),
+    2::bigint,
+    'and total_count counts the same two');
+select is(
+    (select array_agg(e->>'pluginId' order by ord) from public.search_plugins_internal(
+        p_viewer_id => null, p_query => 'test.order', p_verified_only => true) s,
+        jsonb_array_elements(s.plugins) with ordinality as t(e, ord)),
+    array['test.order.c'],
+    'verified-only returns only the verified plugin');
+select is(
+    (select total_count from public.search_plugins_internal(
+        p_viewer_id => null, p_query => 'test.order', p_verified_only => true)),
+    1::bigint,
+    'and total_count counts only it');
 
 -- ---------------------------------------------------------------------------
 -- The ACL is restated, not widened: only service_role calls the internal function.

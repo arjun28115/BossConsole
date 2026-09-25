@@ -19,6 +19,11 @@
 --
 -- The filters, the JSON keys and values, total_count, the signature and the ACL are unchanged; this
 -- restates 20260923133000's body with only the ordering and the order of work changed.
+--
+-- Do not fold the count into `ranked` as count(*) OVER (): the window counts the rows `ranked`
+-- keeps, and on a page past the end it keeps none, so total_count would read 0 instead of the
+-- number of matches. The count stays its own query over the same filters, which is why the filter
+-- block appears twice; search_plugins_order_test.sql checks each filter against both copies.
 
 CREATE OR REPLACE FUNCTION "public"."search_plugins_internal"(
     "p_viewer_id" "uuid",
